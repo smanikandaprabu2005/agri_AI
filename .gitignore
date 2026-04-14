@@ -1,0 +1,20 @@
+# datasets
+data_pipeline/data_raw/
+data_pipeline/data collection/
+data_pipeline/processed/
+data_pipeline/tokens/
+
+# models
+saved_models/
+*.pt
+*.bin
+*.ckpt
+
+# large data
+*.jsonl
+*.txt
+*.zip
+
+# python cache
+__pycache__/
+*.pyc
