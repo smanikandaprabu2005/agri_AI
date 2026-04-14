@@ -12,6 +12,7 @@ saved_models/
 
 # large data
 *.jsonl
+*.json
 *.txt
 *.zip
 
