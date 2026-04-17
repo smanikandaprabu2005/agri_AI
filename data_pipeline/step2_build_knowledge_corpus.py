@@ -33,7 +33,7 @@ from pathlib import Path
 ICAR_FILE     = "data/raw/ICAR_Text_Extracted.json"
 RESEARCH_FILE = "data/raw/research_wikipedia_final_dataset.txt"
 OUTPUT_FILE   = "processed/knowledge_corpus.txt"
-MIN_SENT_LEN  = 80    # minimum characters per sentence to keep
+MIN_SENT_LEN  = 40   # minimum characters per sentence to keep
 
 
 # ── Text cleaner ──────────────────────────────────────────────

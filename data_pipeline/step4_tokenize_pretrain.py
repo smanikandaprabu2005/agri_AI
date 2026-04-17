@@ -37,7 +37,7 @@ except ImportError:
 TOKENIZER_MODEL = "sage_tokenizer.model"
 CORPUS_FILE     = "processed/knowledge_corpus.txt"
 OUTPUT_FILE     = "tokens/pretrain_tokens.jsonl"
-MIN_TEXT_LEN    = 50    # skip very short sentences
+MIN_TEXT_LEN    = 30    # skip very short sentences
 
 
 # ── Cleaner ───────────────────────────────────────────────────
