@@ -36,8 +36,8 @@ from models.tokenizer import build_training_prompt, RESPONSE_MARKER
 # ── Config ────────────────────────────────────────────────────
 # FIX 2: Use paths from config (no spaces in directory names)
 TOKENIZER_MODEL = "sage_tokenizer.model"
-TRAIN_DATASET   = "data/train_data/train_dataset.jsonl"
-VAL_DATASET     = "data/val_data/val_dataset.jsonl"
+TRAIN_DATASET   = "data collection/train_data/train_dataset.jsonl"
+VAL_DATASET     = "data collection/val_data/val_dataset.jsonl"
 TRAIN_TOKENS    = "tokens/train_tokens.jsonl"
 VAL_TOKENS      = "tokens/val_tokens.jsonl"
 

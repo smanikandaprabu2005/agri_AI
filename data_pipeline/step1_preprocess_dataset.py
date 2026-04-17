@@ -23,11 +23,11 @@ from pathlib import Path
 from collections import Counter
 
 # ── Config ────────────────────────────────────────────────────
-INPUT_FILE       = "data/raw/final_finetune_training_dataset.jsonl"
+INPUT_FILE       = "data/raw/final_agriculture_training_dataset.jsonl"
 TRAIN_FILE       = "data collection/train_data/train_dataset.jsonl"
 VAL_FILE         = "data collection/val_data/val_dataset.jsonl"
 
-MIN_OUTPUT_WORDS = 15      # V2.1: raised from 5 → removes near-empty answers
+MIN_OUTPUT_WORDS = 10      # V2.1: raised from 5 → removes near-empty answers
 MAX_OUTPUT_WORDS = 512
 MAX_INPUT_WORDS  = 50      # V2.1: new — cap instruction length
 TRAIN_SPLIT      = 0.9
