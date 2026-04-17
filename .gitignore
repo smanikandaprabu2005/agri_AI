@@ -1,5 +1,5 @@
 # datasets
-data_pipeline/data_raw/
+data_pipeline/data/
 data_pipeline/data collection/
 data_pipeline/processed/
 data_pipeline/tokens/

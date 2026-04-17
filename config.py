@@ -1,8 +1,14 @@
 """
-config.py
-=========
-Single source of truth for all project hyperparameters.
-Import this in every module instead of hardcoding values.
+config.py  —  SageStorm V2.1  (production-ready hyperparameters)
+=================================================================
+Key changes from V2:
+  - Label smoothing 0.10 → 0.15   (fixes overconfident loss)
+  - Finetune LR max 5e-5 → 3e-5   (less overshooting with 337K samples)
+  - Warmup steps 200 → 400        (longer ramp for big dataset)
+  - Rep penalty 1.20 → 1.10       (less aggressive, less truncated answers)
+  - Context max 600 → 1200 chars  (richer RAG context window)
+  - Added cosine annealing min 3e-7 (V2 stopped too early)
+  - Patience 8 → 10               (337K set needs more epochs to stabilise)
 """
 
 import os
@@ -49,32 +55,35 @@ PRETRAIN_LR_MIN   = 1e-5
 PRETRAIN_WARMUP   = 500
 PRETRAIN_ACCUM    = 4
 
-# ── Fine-tuning ──────────────────────────────────────────────
+# ── Fine-tuning  (V2.1 CHANGES MARKED) ──────────────────────
 FINETUNE_BATCH    = 16
 FINETUNE_EPOCHS   = 50
-FINETUNE_LR_MAX   = 5e-5
-FINETUNE_LR_MIN   = 5e-7
-FINETUNE_WARMUP   = 200
+FINETUNE_LR_MAX   = 3e-5      # ← V2.1: was 5e-5 (too high for 337K samples)
+FINETUNE_LR_MIN   = 3e-7      # ← V2.1: was 5e-7 (slightly warmer floor)
+FINETUNE_WARMUP   = 400       # ← V2.1: was 200 (longer warmup for big set)
 FINETUNE_ACCUM    = 4
-FINETUNE_PATIENCE = 8
-LABEL_SMOOTHING   = 0.1
+FINETUNE_PATIENCE = 10        # ← V2.1: was 8
+LABEL_SMOOTHING   = 0.15      # ← V2.1: was 0.10 (KEY fix for high loss)
 LR_DECAY_RATE     = 0.85
 WEIGHT_DECAY      = 0.05
 CLIP_NORM         = 1.0
 
-# ── Retrieval (Word2Vec) ─────────────────────────────────────
+# ── Retrieval (Word2Vec + optional BM25) ─────────────────────
 W2V_EMBED_SIZE    = 64
 W2V_EPOCHS        = 8
 W2V_WINDOW        = 3
 W2V_NEG_SAMPLES   = 5
 RETRIEVAL_TOP_K   = 5
 
-# ── Generation ───────────────────────────────────────────────
+# ── Generation  (V2.1 CHANGES MARKED) ───────────────────────
 GEN_MAX_TOKENS    = 150
 GEN_TEMPERATURE   = 0.7
 GEN_TOP_K         = 50
 GEN_TOP_P         = 0.9
-GEN_REP_PENALTY   = 1.2
+GEN_REP_PENALTY   = 1.10      # ← V2.1: was 1.20 (less choppy, more fluent)
+
+# ── RAG context ──────────────────────────────────────────────
+RAG_CONTEXT_MAX   = 1200      # ← V2.1: was 600 (richer context = better gen)
 
 # ── Weather ──────────────────────────────────────────────────
 DEFAULT_CITY      = "Guwahati"
