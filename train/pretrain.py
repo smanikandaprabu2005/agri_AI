@@ -88,22 +88,29 @@ def get_lr(step: int, total: int, warmup: int, lr_max: float, lr_min: float) -> 
 #  Evaluation
 # ══════════════════════════════════════════════════════════════
 @torch.no_grad()
-def evaluate(model: SageStormV2, loader: DataLoader, crit: nn.Module) -> float:
+def evaluate(model, loader, crit):
     model.eval()
     total_loss = 0.0
+    count = 0
+
     for x, y in loader:
         x, y = x.to(DEVICE), y.to(DEVICE)
-        # FIX 1: autocast device guard
+
         if USE_AMP and DEVICE == "cuda":
             with torch.amp.autocast("cuda"):
                 logits = model(x)
         else:
             logits = model(x)
+
         logits = torch.clamp(logits, -50, 50)
 
-        total_loss += crit(logits.view(-1, VOCAB_SIZE), y.view(-1)).item()
-    return total_loss / max(len(loader), 1)
+        loss = crit(logits.view(-1, VOCAB_SIZE), y.view(-1))
 
+        if torch.isfinite(loss):
+            total_loss += loss.item()
+            count += 1
+
+    return total_loss / count if count > 0 else float("inf")
 
 # ══════════════════════════════════════════════════════════════
 #  Training epoch
@@ -268,16 +275,17 @@ def main():
             # FIX 4: Save based on val_loss, not train_loss
             if val_loss < best_val:
                 best_val = val_loss
+                real_model = model.module if hasattr(model, "module") else model
                 torch.save({
-                    "model_state": (model.module if hasattr(model, "module") else model).state_dict(),
+                    "model_state": real_model.state_dict(),
                     "epoch": epoch,
                     "config": {
-                        "vocab_size"    : model.vocab_size,
-                        "context_length": model.context_length,
-                        "embed_dim"     : model.embed_dim,
-                        "num_heads"     : model.blocks[0].attn.n_heads,
-                        "kv_heads"      : model.blocks[0].attn.kv_heads,
-                        "num_layers"    : len(model.blocks),
+                        "vocab_size"    : real_model.vocab_size,
+                        "context_length": real_model.context_length,
+                        "embed_dim"     : real_model.embed_dim,
+                        "num_heads"     : real_model.blocks[0].attn.n_heads,
+                        "kv_heads"      : real_model.blocks[0].attn.kv_heads,
+                        "num_layers"    : len(real_model.blocks),
                     },
                 }, PRETRAINED_CKPT)
                 print(f"  ✓ Best model saved (val_loss={best_val:.4f})")

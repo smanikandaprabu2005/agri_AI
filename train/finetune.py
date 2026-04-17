@@ -199,24 +199,40 @@ def get_lr_scale(step: int, total: int, warmup: int) -> float:
 @torch.no_grad()
 def evaluate(model: SageStormV2, loader: DataLoader, crit: nn.Module) -> dict:
     model.eval()
-    tot_loss = tot_cor = tot_tok = 0
+
+    tot_loss = 0.0
+    tot_cor  = 0
+    tot_tok  = 0
+    count    = 0
+
     for x, y in loader:
         x, y = x.to(DEVICE), y.to(DEVICE)
+
         with torch.amp.autocast("cuda", enabled=USE_AMP):
             logits = model(x)
-        logits = torch.clamp(logits, -50, 50)
-        loss = crit(logits.view(-1, VOCAB_SIZE), y.view(-1))
-        tot_loss += loss.item()
-        mask      = (y != -100)
-        tot_cor  += ((logits.argmax(-1) == y) & mask).sum().item()
-        tot_tok  += mask.sum().item()
 
-    n    = len(loader)
-    loss = tot_loss / max(n, 1)
+        # prevent numerical overflow
+        logits = torch.clamp(logits, -50, 50)
+
+        loss = crit(logits.view(-1, VOCAB_SIZE), y.view(-1))
+
+        # skip invalid batches
+        if not torch.isfinite(loss):
+            continue
+
+        tot_loss += loss.item()
+        count += 1
+
+        mask = (y != -100)
+        tot_cor += ((logits.argmax(-1) == y) & mask).sum().item()
+        tot_tok += mask.sum().item()
+
+    loss = tot_loss / count if count > 0 else float("inf")
+
     return {
         "loss": loss,
-        "ppl" : math.exp(min(loss, 20)),
-        "acc" : tot_cor / max(tot_tok, 1),
+        "ppl": math.exp(min(loss, 20)),
+        "acc": tot_cor / max(tot_tok, 1),
     }
 
 
@@ -337,7 +353,7 @@ def main():
     print(f"[Model] {pc['total_M']}M unique parameters")
 
     # ── Optimiser & scheduler ─────────────────────────────────
-    groups   = make_param_groups(model, FINETUNE_LR_MAX)
+    groups = make_param_groups(real_model, FINETUNE_LR_MAX)
     base_lrs = [g["lr"] for g in groups]
 
     # Apply weight decay only to 2-D matrices (no bias, no norms)
