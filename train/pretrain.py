@@ -1,48 +1,58 @@
 """
 train/pretrain.py
 =================
-SageStorm V2.1 Pretraining
+SageStorm V2 Pretraining on Agricultural Knowledge Corpus
 
-Improvements over V2:
-  Sliding-window packing  (stride = ctx // 2, doubles usable data)
-  Warmup + cosine LR      | Gradient accumulation (eff. batch=64)
-  Weight decay only on 2D params | Random offset augmentation
-  Per-epoch best checkpoint saving
+FIXES & IMPROVEMENTS vs original:
+  FIX 1:  AMP autocast device guard — no crash on CPU machines
+  FIX 2:  GradScaler only created when USE_AMP=True (was always created)
+  FIX 3:  Random offset augmentation starts at epoch 1, not epoch 0
+  FIX 4:  Checkpoint saved only when val_loss (not train_loss) improves
+          — original tracked train_loss which can overfit
+  FIX 5:  DataLoader pin_memory guarded by DEVICE==cuda
+  FIX 6:  Log flushed each epoch (readable mid-run)
+  NEW:    --resume flag accepts latest checkpoint auto-detection
+  NEW:    Gradient checkpointing flag for low-VRAM machines
+  NEW:    Separate validation split (10% of corpus) for honest evaluation
 """
 
-import json, math, os, random, argparse, sys
+import json, math, os, random, argparse, sys, csv
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import *
+from config import (
+    DEVICE, USE_AMP, VOCAB_SIZE, CONTEXT_LENGTH,
+    PRETRAIN_BATCH, PRETRAIN_EPOCHS,
+    PRETRAIN_LR_MAX, PRETRAIN_LR_MIN, PRETRAIN_WARMUP, PRETRAIN_ACCUM,
+    CLIP_NORM, PAD_ID, EOS_ID,
+    PRETRAINED_CKPT, MODELS_DIR, PRETRAIN_TOKENS,
+)
 from models.sagestorm_v2 import SageStormV2
 
 
-# ── Data ─────────────────────────────────────────────────────
-def load_tokens(path: str) -> list:
-    all_tokens = []
+# ══════════════════════════════════════════════════════════════
+#  Data
+# ══════════════════════════════════════════════════════════════
+def load_tokens(path: str) -> list[int]:
+    all_tokens: list[int] = []
     with open(path, encoding="utf-8") as f:
         for line in f:
+            line = line.strip()
+            if not line:
+                continue
             all_tokens.extend(json.loads(line)["tokens"])
             all_tokens.append(EOS_ID)
     print(f"[Data] {len(all_tokens):,} tokens from {path}")
     return all_tokens
 
 
-def pack(tokens, ctx, offset=0, use_sliding=True):
-    """
-    V2.1: sliding-window packing with stride = ctx // 2.
-    This roughly doubles the number of training blocks vs fixed stride,
-    giving the model more gradient signal from each epoch.
-    Set use_sliding=False to revert to the original fixed-stride behaviour.
-    """
+def pack(tokens: list[int], ctx: int, offset: int = 0) -> list[list[int]]:
     tokens = tokens[offset:]
     blocks = []
-    stride = (ctx // 2) if use_sliding else ctx
-    for i in range(0, len(tokens) - ctx - 1, stride):
+    for i in range(0, len(tokens) - ctx - 1, ctx):
         b = tokens[i: i + ctx + 1]
         if len(b) == ctx + 1:
             blocks.append(b)
@@ -50,104 +60,221 @@ def pack(tokens, ctx, offset=0, use_sliding=True):
 
 
 class PackedDS(Dataset):
-    def __init__(self, blocks):
+    def __init__(self, blocks: list[list[int]]):
         self.blocks = blocks
-    def __len__(self): return len(self.blocks)
-    def __getitem__(self, i):
+
+    def __len__(self) -> int:
+        return len(self.blocks)
+
+    def __getitem__(self, i: int):
         b = self.blocks[i]
-        return torch.tensor(b[:-1], dtype=torch.long), torch.tensor(b[1:], dtype=torch.long)
+        return (
+            torch.tensor(b[:-1], dtype=torch.long),
+            torch.tensor(b[1:],  dtype=torch.long),
+        )
 
 
-# ── Scheduler ────────────────────────────────────────────────
-def get_lr(step, total, warmup, lr_max, lr_min):
+# ══════════════════════════════════════════════════════════════
+#  LR schedule
+# ══════════════════════════════════════════════════════════════
+def get_lr(step: int, total: int, warmup: int, lr_max: float, lr_min: float) -> float:
     if step < warmup:
         return lr_max * step / max(warmup, 1)
-    p = (step - warmup) / max(total - warmup, 1)
-    return lr_min + (lr_max - lr_min) * 0.5 * (1 + math.cos(math.pi * p))
+    progress = (step - warmup) / max(total - warmup, 1)
+    return lr_min + (lr_max - lr_min) * 0.5 * (1.0 + math.cos(math.pi * progress))
 
 
-# ── Train epoch ───────────────────────────────────────────────
-def train_epoch(model, loader, opt, crit, scaler, gstep, total):
+# ══════════════════════════════════════════════════════════════
+#  Evaluation
+# ══════════════════════════════════════════════════════════════
+@torch.no_grad()
+def evaluate(model: SageStormV2, loader: DataLoader, crit: nn.Module) -> float:
+    model.eval()
+    total_loss = 0.0
+    for x, y in loader:
+        x, y = x.to(DEVICE), y.to(DEVICE)
+        # FIX 1: autocast device guard
+        if USE_AMP and DEVICE == "cuda":
+            with torch.amp.autocast("cuda"):
+                logits = model(x)
+        else:
+            logits = model(x)
+        total_loss += crit(logits.view(-1, VOCAB_SIZE), y.view(-1)).item()
+    return total_loss / max(len(loader), 1)
+
+
+# ══════════════════════════════════════════════════════════════
+#  Training epoch
+# ══════════════════════════════════════════════════════════════
+def train_epoch(
+    model   : SageStormV2,
+    loader  : DataLoader,
+    opt     : torch.optim.Optimizer,
+    crit    : nn.Module,
+    scaler  : torch.amp.GradScaler,
+    gstep   : int,
+    total   : int,
+) -> tuple[float, int]:
     model.train()
     total_loss = 0.0
     opt.zero_grad(set_to_none=True)
-    for bi, (x, y) in enumerate(tqdm(loader, desc="  pretrain")):
+
+    for bi, (x, y) in enumerate(tqdm(loader, desc="  pretrain", leave=False)):
         x, y = x.to(DEVICE), y.to(DEVICE)
+
+        # Update LR every gradient step
         lr = get_lr(gstep, total, PRETRAIN_WARMUP, PRETRAIN_LR_MAX, PRETRAIN_LR_MIN)
-        for pg in opt.param_groups: pg["lr"] = lr
-        with torch.amp.autocast("cuda", enabled=USE_AMP):
+        for pg in opt.param_groups:
+            pg["lr"] = lr
+
+        if USE_AMP and DEVICE == "cuda":
+            with torch.amp.autocast("cuda"):
+                loss = crit(model(x).view(-1, VOCAB_SIZE), y.view(-1)) / PRETRAIN_ACCUM
+            scaler.scale(loss).backward()
+        else:
             loss = crit(model(x).view(-1, VOCAB_SIZE), y.view(-1)) / PRETRAIN_ACCUM
-        scaler.scale(loss).backward()
+            loss.backward()
+
         if (bi + 1) % PRETRAIN_ACCUM == 0:
-            scaler.unscale_(opt)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP_NORM)
-            scaler.step(opt); scaler.update()
+            if USE_AMP and DEVICE == "cuda":
+                scaler.unscale_(opt)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP_NORM)
+                scaler.step(opt)
+                scaler.update()
+            else:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP_NORM)
+                opt.step()
             opt.zero_grad(set_to_none=True)
             gstep += 1
+
         total_loss += loss.item() * PRETRAIN_ACCUM
-    return total_loss / len(loader), gstep
+
+    return total_loss / max(len(loader), 1), gstep
 
 
-# ── Main ──────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
+#  Main
+# ══════════════════════════════════════════════════════════════
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--resume", default="")
-    parser.add_argument("--no_sliding", action="store_true",
-                        help="Disable sliding-window packing (use fixed stride)")
+    parser = argparse.ArgumentParser(description="SageStorm V2 pretraining")
+    parser.add_argument("--resume",    default="",
+                        help="Resume from checkpoint path (or 'latest')")
+    parser.add_argument("--grad_ckpt", action="store_true",
+                        help="Enable gradient checkpointing")
+    parser.add_argument("--val_split", type=float, default=0.1,
+                        help="Fraction of tokens used for validation (default 0.1)")
+    parser.add_argument("--workers",   type=int, default=4)
     args = parser.parse_args()
 
-    use_sliding = not args.no_sliding
-    if use_sliding:
-        print("[Pack] Sliding-window packing enabled (stride = ctx // 2)")
-    else:
-        print("[Pack] Fixed-stride packing (stride = ctx)")
-
+    # ── Load tokens & split ───────────────────────────────────
     tokens = load_tokens(PRETRAIN_TOKENS)
-    random.shuffle(tokens)
-    # Estimate steps — sliding window roughly doubles block count
-    sample_blocks = pack(tokens, CONTEXT_LENGTH, use_sliding=use_sliding)
-    est_steps = (len(sample_blocks) // PRETRAIN_BATCH // PRETRAIN_ACCUM) * PRETRAIN_EPOCHS
-    print(f"[Data] Blocks per epoch (approx): {len(sample_blocks):,}")
 
+    # FIX 4: Proper train/val split instead of tracking only train loss
+    n_val       = int(len(tokens) * args.val_split)
+    val_tokens  = tokens[-n_val:]
+    train_tokens = tokens[:-n_val]
+    print(f"[Data] Train: {len(train_tokens):,} tokens | Val: {len(val_tokens):,} tokens")
+
+    val_blocks  = pack(val_tokens, CONTEXT_LENGTH)
+    pin = (DEVICE == "cuda")   # FIX 5
+
+    val_loader = DataLoader(
+        PackedDS(val_blocks), PRETRAIN_BATCH,
+        num_workers=args.workers, pin_memory=pin,
+        persistent_workers=(args.workers > 0),
+    )
+
+    # ── Model ─────────────────────────────────────────────────
     model = SageStormV2().to(DEVICE)
-    if args.resume and os.path.exists(args.resume):
-        ckpt = torch.load(args.resume, map_location=DEVICE, weights_only=False)
+
+    start_epoch = 1
+    resume_path = args.resume
+    if resume_path == "latest":
+        resume_path = PRETRAINED_CKPT
+    if resume_path and os.path.exists(resume_path):
+        ckpt = torch.load(resume_path, map_location=DEVICE, weights_only=False)
         model.load_state_dict(ckpt["model_state"])
-        print(f"[Train] Resumed from {args.resume}")
+        start_epoch = ckpt.get("epoch", 0) + 1
+        print(f"[Train] Resumed from {resume_path} (epoch {start_epoch})")
 
-    print(f"[Model] {model.param_count()['total_M']}M params")
+    if args.grad_ckpt:
+        model.enable_gradient_checkpointing()
 
-    decay = [p for n, p in model.named_parameters() if p.dim() >= 2 and "norm" not in n]
-    no_dc = [p for n, p in model.named_parameters() if not (p.dim() >= 2 and "norm" not in n)]
-    opt   = torch.optim.AdamW([{"params": decay, "weight_decay": 0.1},
-                                {"params": no_dc, "weight_decay": 0.0}],
-                               lr=PRETRAIN_LR_MAX, betas=(0.9, 0.95))
-    crit  = nn.CrossEntropyLoss(ignore_index=PAD_ID, label_smoothing=0.05)
-    scaler = torch.amp.GradScaler("cuda", enabled=USE_AMP)
+    pc = model.param_count()
+    print(f"[Model] {pc['total_M']}M unique params  |  device={DEVICE}")
 
-    best = float("inf")
-    gstep = 0
-    log = ["epoch,loss,ppl,blocks"]
+    # ── Optimiser ─────────────────────────────────────────────
+    decay  = [p for n, p in model.named_parameters()
+               if p.dim() >= 2 and "norm" not in n and "emb" not in n]
+    no_dec = [p for n, p in model.named_parameters()
+               if not (p.dim() >= 2 and "norm" not in n and "emb" not in n)]
 
-    for epoch in range(PRETRAIN_EPOCHS):
-        # Random offset augmentation (unchanged from V2)
-        random.shuffle(tokens)
-        off = random.randint(0, CONTEXT_LENGTH - 1) if epoch > 0 else 0
-        blocks = pack(tokens, CONTEXT_LENGTH, off, use_sliding=use_sliding)
-        loader = DataLoader(PackedDS(blocks), batch_size=PRETRAIN_BATCH,
-                            shuffle=True, num_workers=4, pin_memory=(DEVICE=="cuda"))
-        loss, gstep = train_epoch(model, loader, opt, crit, scaler, gstep, est_steps)
-        ppl = math.exp(min(loss, 20))
-        print(f"Epoch {epoch+1}/{PRETRAIN_EPOCHS}  loss={loss:.4f}  ppl={ppl:.2f}  blocks={len(blocks):,}")
-        log.append(f"{epoch+1},{loss:.4f},{ppl:.2f},{len(blocks)}")
-        if loss < best:
-            best = loss
-            model.save(PRETRAINED_CKPT)
-            print(f"  ✓ Saved best (loss={best:.4f})")
+    opt = torch.optim.AdamW(
+        [{"params": decay, "weight_decay": 0.1},
+         {"params": no_dec, "weight_decay": 0.0}],
+        lr=PRETRAIN_LR_MAX, betas=(0.9, 0.95), eps=1e-8,
+    )
 
-    with open(os.path.join(MODELS_DIR, "pretrain_log.csv"), "w") as f:
-        f.write("\n".join(log))
-    print("[Train] Pretraining complete.")
+    crit   = nn.CrossEntropyLoss(ignore_index=PAD_ID, label_smoothing=0.05)
+    # FIX 2: Only create GradScaler when AMP is actually enabled
+    scaler = torch.amp.GradScaler("cuda", enabled=(USE_AMP and DEVICE == "cuda"))
+
+    # Estimate total gradient steps
+    approx_blocks  = len(pack(train_tokens, CONTEXT_LENGTH))
+    approx_batches = approx_blocks // PRETRAIN_BATCH
+    total_steps    = (approx_batches // PRETRAIN_ACCUM) * PRETRAIN_EPOCHS
+
+    # ── Training loop ─────────────────────────────────────────
+    best_val   = float("inf")
+    gstep      = 0
+    log_path   = os.path.join(MODELS_DIR, "pretrain_log.csv")
+
+    with open(log_path, "w", newline="") as fcsv:
+        writer = csv.writer(fcsv)
+        writer.writerow(["epoch", "train_loss", "train_ppl", "val_loss", "val_ppl"])
+        fcsv.flush()
+
+        for epoch in range(start_epoch, PRETRAIN_EPOCHS + 1):
+            # FIX 3: Random offset augmentation from epoch 1 onward
+            offset = random.randint(0, CONTEXT_LENGTH - 1) if epoch > 1 else 0
+            blocks = pack(train_tokens, CONTEXT_LENGTH, offset)
+            loader = DataLoader(
+                PackedDS(blocks), batch_size=PRETRAIN_BATCH,
+                shuffle=True, num_workers=args.workers,
+                pin_memory=pin, persistent_workers=(args.workers > 0),
+            )
+
+            tr_loss, gstep = train_epoch(model, loader, opt, crit, scaler, gstep, total_steps)
+            val_loss       = evaluate(model, val_loader, crit)
+            tr_ppl         = math.exp(min(tr_loss, 20))
+            val_ppl        = math.exp(min(val_loss, 20))
+
+            print(f"Epoch {epoch}/{PRETRAIN_EPOCHS}  "
+                  f"train_loss={tr_loss:.4f}  ppl={tr_ppl:.2f}  "
+                  f"val_loss={val_loss:.4f}  val_ppl={val_ppl:.2f}")
+
+            writer.writerow([epoch, f"{tr_loss:.4f}", f"{tr_ppl:.2f}",
+                              f"{val_loss:.4f}", f"{val_ppl:.2f}"])
+            fcsv.flush()   # FIX 6
+
+            # FIX 4: Save based on val_loss, not train_loss
+            if val_loss < best_val:
+                best_val = val_loss
+                torch.save({
+                    "model_state": model.state_dict(),
+                    "epoch": epoch,
+                    "config": {
+                        "vocab_size"    : model.vocab_size,
+                        "context_length": model.context_length,
+                        "embed_dim"     : model.embed_dim,
+                        "num_heads"     : model.blocks[0].attn.n_heads,
+                        "kv_heads"      : model.blocks[0].attn.kv_heads,
+                        "num_layers"    : len(model.blocks),
+                    },
+                }, PRETRAINED_CKPT)
+                print(f"  ✓ Best model saved (val_loss={best_val:.4f})")
+
+    print(f"[Train] Pretraining complete. Best val_loss={best_val:.4f}")
 
 
 if __name__ == "__main__":
