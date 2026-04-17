@@ -332,7 +332,7 @@ def main():
     if args.grad_ckpt:
         model.enable_gradient_checkpointing()
 
-    pc = model.param_count()
+    pc = real_model.param_count()
     print(f"[Model] {pc['total_M']}M unique parameters")
 
     # ── Optimiser & scheduler ─────────────────────────────────

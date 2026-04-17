@@ -99,6 +99,8 @@ def evaluate(model: SageStormV2, loader: DataLoader, crit: nn.Module) -> float:
                 logits = model(x)
         else:
             logits = model(x)
+        logits = torch.clamp(logits, -50, 50)
+
         total_loss += crit(logits.view(-1, VOCAB_SIZE), y.view(-1)).item()
     return total_loss / max(len(loader), 1)
 
@@ -206,7 +208,7 @@ def main():
     if args.grad_ckpt:
         model.enable_gradient_checkpointing()
 
-    pc = model.param_count()
+    pc = model.module.param_count() if hasattr(model, "module") else model.param_count()
     print(f"[Model] {pc['total_M']}M unique params  |  device={DEVICE}")
 
     # ── Optimiser ─────────────────────────────────────────────
