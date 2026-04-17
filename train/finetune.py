@@ -47,12 +47,17 @@ def load_tokens(path):
     return all_t
 
 
-def pack(tokens, ctx):
+def pack(tokens, ctx, use_sliding=True):
     blocks = []
-    for i in range(0, len(tokens) - ctx - 1, ctx):
-        b = tokens[i: i + ctx + 1]
+
+    stride = ctx // 2 if use_sliding else ctx
+
+    for i in range(0, len(tokens) - ctx - 1, stride):
+        b = tokens[i:i + ctx + 1]
+
         if len(b) == ctx + 1:
             blocks.append(b)
+
     return blocks
 
 
@@ -273,8 +278,8 @@ def main():
 
     tr_tok = load_tokens(TRAIN_TOKENS)
     vl_tok = load_tokens(VAL_TOKENS)
-    tr_blk = pack(tr_tok, CONTEXT_LENGTH)
-    vl_blk = pack(vl_tok, CONTEXT_LENGTH)
+    tr_blk = pack(tr_tok, CONTEXT_LENGTH, use_sliding=True)
+    vl_blk = pack(vl_tok, CONTEXT_LENGTH, use_sliding=True)
     print(f"[Data] Train={len(tr_blk):,}  Val={len(vl_blk):,} blocks")
 
     tr_ld = DataLoader(InstructDS(tr_blk, resp_ids), FINETUNE_BATCH,

@@ -1,11 +1,15 @@
 """
 models/sagestorm_v2.py
 ======================
-SageStorm V2 — Complete Model Architecture
+SageStorm V2.1 — Complete Model Architecture
 
-Improvements over V1:
+V2.1 changes (config-driven, no architectural changes):
+  EMBED_DIM = 768  | NUM_HEADS = 12 | CONTEXT_LENGTH = 1024
+  ~85M params (up from ~48M in V2)
+
+Architecture unchanged from V2:
   Pre-LN RMSNorm  | RoPE  | SwiGLU FFN
-  GQA (8q/4kv)   | Weight tying | 12 layers
+  GQA (12q/4kv)   | Weight tying | 12 layers
   Repetition penalty in generation
 """
 
@@ -148,7 +152,7 @@ class Block(nn.Module):
 
 
 # ══════════════════════════════════════════════════════════════
-#  SageStorm V2 — Full Model
+#  SageStorm V2.1 — Full Model
 # ══════════════════════════════════════════════════════════════
 class SageStormV2(nn.Module):
     def __init__(
@@ -171,7 +175,7 @@ class SageStormV2(nn.Module):
         self.norm   = RMSNorm(embed_dim)
         self.head   = nn.Linear(embed_dim, vocab_size, bias=False)
 
-        # Weight tying — saves 8M params
+        # Weight tying — shared embedding/unembedding matrix
         self.head.weight = self.emb.weight
 
         # Causal mask buffer
@@ -258,12 +262,12 @@ class SageStormV2(nn.Module):
         torch.save({
             "model_state": self.state_dict(),
             "config": {
-                "vocab_size": self.vocab_size,
+                "vocab_size":     self.vocab_size,
                 "context_length": self.context_length,
-                "embed_dim": self.emb.embedding_dim,
-                "num_heads": self.blocks[0].attn.n_heads,
-                "kv_heads": self.blocks[0].attn.kv_heads,
-                "num_layers": len(self.blocks),
+                "embed_dim":      self.emb.embedding_dim,
+                "num_heads":      self.blocks[0].attn.n_heads,
+                "kv_heads":       self.blocks[0].attn.kv_heads,
+                "num_layers":     len(self.blocks),
             }
         }, path)
         n = sum(p.numel() for p in self.parameters())
@@ -287,7 +291,7 @@ class SageStormV2(nn.Module):
 if __name__ == "__main__":
     m = SageStormV2()
     c = m.param_count()
-    print(f"SageStorm V2: {c['total_M']}M params")
+    print(f"SageStorm V2.1: {c['total_M']}M params")
     x = torch.randint(0, VOCAB_SIZE, (2, 32))
     out = m(x)
     print(f"Forward: {list(x.shape)} → {list(out.shape)} ✓")
