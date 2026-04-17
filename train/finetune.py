@@ -312,7 +312,12 @@ def main():
     )
 
     # ── Model ─────────────────────────────────────────────────
-    model = SageStormV2().to(DEVICE)
+    model = SageStormV2()
+    if torch.cuda.device_count() > 1 and DEVICE == "cuda":
+        print(f"[Train] Using {torch.cuda.device_count()} GPUs")
+        model = torch.nn.DataParallel(model)
+
+    model = model.to(DEVICE)
     if os.path.exists(args.pretrained):
         ckpt = torch.load(args.pretrained, map_location=DEVICE, weights_only=False)
         missing, unexpected = model.load_state_dict(ckpt["model_state"], strict=False)
@@ -382,7 +387,8 @@ def main():
             if vm["loss"] < best_loss:
                 best_loss = vm["loss"]
                 patience  = 0
-                model.save(FINETUNED_CKPT)
+                real_model = model.module if hasattr(model, "module") else model
+                real_model.save(FINETUNED_CKPT)
                 print(f"  ✓ Best model saved (val_loss={best_loss:.4f})")
             else:
                 patience += 1

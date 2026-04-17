@@ -45,8 +45,8 @@ UNK_ID = 3
 
 # ── Pretraining ──────────────────────────────────────────────
 # FIXED: Pretrain corpus is small (~206K tokens), fewer epochs prevent overfitting
-# Effective batch = PRETRAIN_BATCH * PRETRAIN_ACCUM = 16 * 4 = 64
-PRETRAIN_BATCH   = 16
+# Effective batch = PRETRAIN_BATCH * PRETRAIN_ACCUM = 32 * 4 = 128
+PRETRAIN_BATCH   = 32
 PRETRAIN_EPOCHS  = 30          # was 60 — 206K tokens overfits at 60 epochs
 PRETRAIN_LR_MAX  = 3e-4
 PRETRAIN_LR_MIN  = 1e-5

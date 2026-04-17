@@ -185,7 +185,13 @@ def main():
     )
 
     # ── Model ─────────────────────────────────────────────────
-    model = SageStormV2().to(DEVICE)
+    model = SageStormV2()
+    # Enable multi-GPU if available
+    if torch.cuda.device_count() > 1 and DEVICE == "cuda":
+        print(f"[Train] Using {torch.cuda.device_count()} GPUs")
+        model = torch.nn.DataParallel(model)
+
+    model = model.to(DEVICE)
 
     start_epoch = 1
     resume_path = args.resume
@@ -261,7 +267,7 @@ def main():
             if val_loss < best_val:
                 best_val = val_loss
                 torch.save({
-                    "model_state": model.state_dict(),
+                    "model_state": (model.module if hasattr(model, "module") else model).state_dict(),
                     "epoch": epoch,
                     "config": {
                         "vocab_size"    : model.vocab_size,
