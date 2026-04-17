@@ -204,6 +204,7 @@ def evaluate(model: SageStormV2, loader: DataLoader, crit: nn.Module) -> dict:
         x, y = x.to(DEVICE), y.to(DEVICE)
         with torch.amp.autocast("cuda", enabled=USE_AMP):
             logits = model(x)
+        logits = torch.clamp(logits, -50, 50)
         loss = crit(logits.view(-1, VOCAB_SIZE), y.view(-1))
         tot_loss += loss.item()
         mask      = (y != -100)
@@ -331,7 +332,7 @@ def main():
 
     if args.grad_ckpt:
         model.enable_gradient_checkpointing()
-
+    real_model = model.module if hasattr(model, "module") else model
     pc = real_model.param_count()
     print(f"[Model] {pc['total_M']}M unique parameters")
 
