@@ -27,7 +27,7 @@ from config import VOCAB_SIZE as CONFIG_VOCAB_SIZE
 
 # ── Config ────────────────────────────────────────────────────
 # FIX 1: Removed space from path
-TRAIN_DATASET    = "data_collection/train_data/train_dataset.jsonl"
+TRAIN_DATASET    = "data collection/train_data/train_dataset.jsonl"
 KNOWLEDGE_CORPUS = "processed/knowledge_corpus.txt"
 CORPUS_FILE      = "tokenizer_corpus.txt"
 MODEL_PREFIX     = "sage_tokenizer"
