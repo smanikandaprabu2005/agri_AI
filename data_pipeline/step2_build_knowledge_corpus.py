@@ -44,7 +44,7 @@ def clean_text(text: str) -> str:
     text = re.sub(r"Web Url.*",                  " ", text, flags=re.IGNORECASE)
     text = re.sub(r"\b[A-Z]{6,}\b",             " ", text)   # OCR noise
     text = re.sub(r"(.)\1{5,}",                 " ", text)   # repeated chars
-    text = re.sub(r"[^a-zA-Z0-9.,;:()\-\' ]+", " ", text)   # special symbols
+    text = re.sub(r"[^a-zA-Z0-9.,;:()\-\'%/@ ]+", " ", text)  # special symbols
     text = re.sub(r"\s+",                        " ", text)   # whitespace
     return text.strip()
 
