@@ -17,12 +17,12 @@ import torch
 
 # ── Paths ────────────────────────────────────────────────────
 BASE_DIR          = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR          = os.path.join(BASE_DIR, "data")
+DATA_DIR          = os.path.join(BASE_DIR, "data_pipeline/data/raw")
 MODELS_DIR        = os.path.join(BASE_DIR, "saved_models")
-TOKENS_DIR        = os.path.join(BASE_DIR, "tokens")
+TOKENS_DIR        = os.path.join(BASE_DIR, "data_pipeline/tokens")
 MEMORY_DIR        = os.path.join(BASE_DIR, "memory")
 
-TOKENIZER_PATH    = os.path.join(BASE_DIR, "sage_tokenizer.model")
+TOKENIZER_PATH    = os.path.join(BASE_DIR, "data_pipeline/sage_tokenizer.model")
 PRETRAIN_TOKENS   = os.path.join(TOKENS_DIR, "pretrain_tokens.jsonl")
 TRAIN_TOKENS      = os.path.join(TOKENS_DIR, "train_tokens.jsonl")
 VAL_TOKENS        = os.path.join(TOKENS_DIR, "val_tokens.jsonl")

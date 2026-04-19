@@ -238,11 +238,6 @@ Perplexity       : {m['ppl']:.6f}
 Token Accuracy   : {m['tok_acc']*100:.4f}%   (response tokens only)
 Top-5 Accuracy   : {m['top5_acc']*100:.4f}%
 
-Comparison table:
-  Metric     | V1        | V2 (old) | V2.1 (now) | Δ vs V2
-  Val Loss   | {V1['loss']:.4f}  | {V2['loss']:.4f}   | {m['val_loss']:.4f}     | {'↓ improved' if m['val_loss']<V2['loss'] else '↑ worse'}
-  PPL        | {V1['ppl']:.4f}  | {V2['ppl']:.4f}   | {m['ppl']:.4f}     | {'↓ improved' if m['ppl']<V2['ppl'] else '↑ worse'}
-  Token Acc  | {V1['acc']*100:.1f}%   | {V2['acc']*100:.2f}%  | {m['tok_acc']*100:.2f}%      | {'↑ improved' if m['tok_acc']>V2['acc'] else '↓ worse'}
 """)
 
     if args.ece:
