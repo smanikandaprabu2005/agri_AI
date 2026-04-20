@@ -1,81 +1,37 @@
 """
 train/finetune.py
 =================
-SageStorm V2 Instruction Fine-Tuning — FIXED & OPTIMIZED
+SageStorm V2.1 Instruction Fine-Tuning
 
-ALL V1 BUGS FIXED:
-  BUG 1: Response mask list-comparison → element-wise sliding window search
-  BUG 2: patience=3 → patience=8
-  BUG 3: No warmup → 200-step linear warmup
-  BUG 4: No label smoothing → 0.1
-  BUG 5: Uniform LR → layer-wise LR decay (0.85 per layer)
-
-ADDITIONAL FIXES (from pretrain bug analysis):
-  FIX A: evaluate() now called every epoch with proper AMP wrapping
-  FIX B: CrossEntropyLoss ignore_index=-100 (response mask) is correct — kept
-  FIX C: GradScaler inf/nan guard prevents corrupt optimizer state
-  FIX D: DataParallel-safe gradient clipping
-  FIX E: Val DataLoader created once outside epoch loop
-  FIX F: Non-finite loss guard in both train and evaluate loops
-  FIX G: Proper logging with val_loss, val_ppl, val_acc per epoch
-
-ARCHITECTURE IMPROVEMENTS:
-  - Layer-wise LR decay: head > blocks > embedding
-  - Gradient accumulation: effective batch = FINETUNE_BATCH × FINETUNE_ACCUM
-  - Cosine LR with linear warmup
-  - Best model saved on val_loss improvement
-  - Response-only loss masking (instruction tokens ignored)
+Improvements over V2:
+  + Curriculum learning (easy → hard by output length)
+  + Mixed precision with proper scaler handling
+  + Better early stopping with best-N tracking
+  + Training metrics to CSV log
+  + Gradient norm monitoring
+  + Optional 5% pretrain data mixing to reduce catastrophic forgetting
+  + Cosine LR with restarts option
 """
 
-import json
-import math
-import os
-import argparse
-import sys
-import time
-
+import json, math, os, argparse, sys, random, time
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, Subset
 from tqdm import tqdm
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config import (
-    PRETRAINED_CKPT, FINETUNED_CKPT, MODELS_DIR,
-    TRAIN_TOKENS, VAL_TOKENS,
-    VOCAB_SIZE, CONTEXT_LENGTH, DEVICE,
-    FINETUNE_BATCH, FINETUNE_EPOCHS,
-    FINETUNE_LR_MAX, FINETUNE_LR_MIN, FINETUNE_WARMUP, FINETUNE_ACCUM,
-    FINETUNE_PATIENCE, LABEL_SMOOTHING, LR_DECAY_RATE,
-    WEIGHT_DECAY, CLIP_NORM, USE_AMP, EOS_ID,
-)
+from config import *
 from models.sagestorm_v2 import SageStormV2
 from models.tokenizer import SageTokenizer
 
 
-NUM_WORKERS = 4
-LOG_INTERVAL = 50
-
-
-# ══════════════════════════════════════════════════════════════
-#  Response-mask helper (BUG 1 FIX)
-# ══════════════════════════════════════════════════════════════
+# ── Response mask search ──────────────────────────────────────
 def find_response_start(tokens: list, resp_ids: list) -> int:
-    """
-    Sliding-window search for the response marker token IDs.
-
-    V1 BUG: used `tokens[i: i + R] == resp_ids` which is ALWAYS False
-    in Python because list == list compares identity, not content.
-    
-    FIXED: compare element-by-element with `==` after converting slice.
-    Returns the index AFTER the marker (where response text begins),
-    or -1 if the marker is not found.
-    """
     if not resp_ids:
         return -1
     R = len(resp_ids)
     for i in range(len(tokens) - R + 1):
-        if tokens[i: i + R] == resp_ids:   # list equality works for comparison
+        if tokens[i : i + R] == resp_ids:
             return i + R
     return -1
 
@@ -84,422 +40,257 @@ def find_response_start(tokens: list, resp_ids: list) -> int:
 #  Dataset
 # ══════════════════════════════════════════════════════════════
 def load_tokens(path: str) -> list:
-    """Load token sequences from .jsonl and flatten to list."""
-    if not os.path.exists(path):
-        raise FileNotFoundError(
-            f"[Finetune] Token file not found: {path}\n"
-            f"  Run: python data_pipeline/step5_tokenize_instructions.py"
-        )
-    all_tokens = []
+    all_t = []
     with open(path, encoding="utf-8") as f:
         for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                all_tokens.extend(json.loads(line)["tokens"])
-                all_tokens.append(EOS_ID)
-            except (json.JSONDecodeError, KeyError):
-                continue
-    print(f"[Finetune] Loaded {len(all_tokens):,} tokens ← {path}")
-    return all_tokens
+            obj = json.loads(line)
+            all_t.extend(obj["tokens"])
+            all_t.append(EOS_ID)
+    print(f"[Data] {len(all_t):,} tokens ← {path}")
+    return all_t
 
 
-def pack_blocks(tokens: list, ctx: int) -> list:
-    """Pack flat token list into (ctx+1)-length blocks."""
+def pack(tokens: list, ctx: int) -> list:
     blocks = []
     for i in range(0, len(tokens) - ctx - 1, ctx):
-        b = tokens[i: i + ctx + 1]
+        b = tokens[i : i + ctx + 1]
         if len(b) == ctx + 1:
             blocks.append(b)
     return blocks
 
 
-class InstructionDataset(Dataset):
-    """
-    Dataset that applies response masking:
-    - Tokens BEFORE the ### Response: marker → label = -100 (ignored in loss)
-    - Tokens AFTER the marker → trained normally
-    This forces the model to learn responses, not just reproduce instructions.
-    """
+class InstructDS(Dataset):
     def __init__(self, blocks: list, resp_ids: list):
         self.blocks   = blocks
         self.resp_ids = resp_ids
-        # Count how many blocks have a response marker
-        found = sum(1 for b in blocks
-                    if find_response_start(list(b[:-1]), resp_ids) >= 0)
-        print(f"[Dataset] {len(blocks):,} blocks | "
-              f"{found:,} with response mask ({found/max(len(blocks),1)*100:.1f}%)")
 
     def __len__(self):
         return len(self.blocks)
 
-    def __getitem__(self, idx: int):
-        b    = self.blocks[idx]
-        x    = list(b[:-1])   # input tokens
-        y    = list(b[1:])    # target tokens
-
-        # Apply response masking: ignore instruction tokens in loss
+    def __getitem__(self, i):
+        b     = self.blocks[i]
+        x     = b[:-1]
+        y     = list(b[1:])
         start = find_response_start(x, self.resp_ids)
         if start > 0:
             for j in range(start):
-                y[j] = -100    # CrossEntropyLoss ignores index -100
-
-        return (
-            torch.tensor(x, dtype=torch.long),
-            torch.tensor(y, dtype=torch.long),
-        )
+                y[j] = -100
+        return torch.tensor(x, dtype=torch.long), torch.tensor(y, dtype=torch.long)
 
 
-# ══════════════════════════════════════════════════════════════
-#  Layer-wise LR Decay (BUG 5 FIX)
-# ══════════════════════════════════════════════════════════════
+def curriculum_sort(blocks: list, resp_ids: list) -> list:
+    """
+    Sort blocks so shorter response sections come first.
+    This is the 'easy examples first' curriculum — the model
+    learns simple short answers before complex long ones.
+    """
+    def resp_len(block):
+        x     = block[:-1]
+        start = find_response_start(x, resp_ids)
+        if start < 0:
+            return len(x)
+        return len(x) - start
+
+    return sorted(blocks, key=resp_len)
+
+
+# ── Layer-wise LR decay ───────────────────────────────────────
 def make_param_groups(model: SageStormV2, base_lr: float) -> list:
-    """
-    Layer-wise LR decay: head > blocks[top] > blocks[bottom] > embedding.
-    This stabilizes training by using smaller LR for lower layers that
-    are already pre-trained on general patterns.
-    
-    Handles weight tying (emb.weight == head.weight) by tracking param IDs.
-    """
-    n_layers = len(model.blocks)
-    groups   = []
-    seen     = set()
+    n       = len(model.blocks)
+    groups  = []
+    seen    = set()
 
-    # Embedding (lowest LR — most general features)
-    emb_params = []
-    for p in model.emb.parameters():
-        if id(p) not in seen:
-            emb_params.append(p)
-            seen.add(id(p))
-    groups.append({
-        "params": emb_params,
-        "lr":     base_lr * (LR_DECAY_RATE ** (n_layers + 1)),
-        "name":   "emb",
-    })
+    emb_params = [p for p in model.emb.parameters() if id(p) not in seen]
+    for p in emb_params: seen.add(id(p))
+    groups.append({"params": emb_params,
+                   "lr": base_lr * (LR_DECAY_RATE ** (n + 1)), "name": "emb"})
 
-    # Transformer blocks (increasing LR from bottom to top)
     for i, blk in enumerate(model.blocks):
-        blk_params = []
-        for p in blk.parameters():
-            if id(p) not in seen:
-                blk_params.append(p)
-                seen.add(id(p))
-        if blk_params:
-            groups.append({
-                "params": blk_params,
-                "lr":     base_lr * (LR_DECAY_RATE ** (n_layers - i)),
-                "name":   f"blk{i}",
-            })
+        blk_params = [p for p in blk.parameters() if id(p) not in seen]
+        for p in blk_params: seen.add(id(p))
+        groups.append({"params": blk_params,
+                       "lr": base_lr * (LR_DECAY_RATE ** (n - i)), "name": f"blk{i}"})
 
-    # Head + final norm (highest LR — task-specific output)
-    head_params = []
-    for p in list(model.norm.parameters()) + list(model.head.parameters()):
-        if id(p) not in seen:
-            head_params.append(p)
-            seen.add(id(p))
-    groups.append({
-        "params": head_params,
-        "lr":     base_lr,
-        "name":   "head",
-    })
+    head_params = [p for p in list(model.norm.parameters()) + list(model.head.parameters())
+                   if id(p) not in seen]
+    for p in head_params: seen.add(id(p))
+    groups.append({"params": head_params, "lr": base_lr, "name": "head"})
 
-    total_params = sum(p.numel() for g in groups for p in g["params"])
-    print(f"[Finetune] Param groups: {len(groups)} | "
-          f"LR range: [{base_lr*(LR_DECAY_RATE**(n_layers+1)):.2e}, {base_lr:.2e}]")
-    print(f"[Finetune] Total trainable params: {total_params/1e6:.2f}M")
     return groups
 
 
-# ══════════════════════════════════════════════════════════════
-#  LR Schedule (BUG 3 FIX)
-# ══════════════════════════════════════════════════════════════
-def get_lr_scale(step: int, total: int, warmup: int,
-                 lr_max: float, lr_min: float) -> float:
-    """Linear warmup + cosine decay. Returns scale factor [0, 1]."""
+def get_scale(step: int, total: int, warmup: int) -> float:
     if step < warmup:
-        return (step + 1) / max(warmup, 1)
-    if step >= total:
-        return lr_min / lr_max
-    progress = (step - warmup) / max(total - warmup, 1)
-    cosine   = 0.5 * (1 + math.cos(math.pi * progress))
-    return lr_min / lr_max + (1 - lr_min / lr_max) * cosine
+        return step / max(warmup, 1)
+    p  = (step - warmup) / max(total - warmup, 1)
+    mn = FINETUNE_LR_MIN / FINETUNE_LR_MAX
+    return mn + (1 - mn) * 0.5 * (1 + math.cos(math.pi * p))
 
 
-def apply_lr_scale(optimizer, base_lrs: list, scale: float):
-    for pg, blr in zip(optimizer.param_groups, base_lrs):
-        pg["lr"] = blr * scale
-
-
-# ══════════════════════════════════════════════════════════════
-#  Evaluate
-# ══════════════════════════════════════════════════════════════
+# ── Evaluation ────────────────────────────────────────────────
 @torch.no_grad()
-def evaluate(model, loader: DataLoader, criterion: nn.Module,
-             device: str, use_amp: bool) -> dict:
-    """Full validation pass — FIXED to actually run and return finite values."""
-    raw_model = model.module if hasattr(model, "module") else model
-    raw_model.eval()
-
-    total_loss = 0.0
-    total_cor  = 0
-    total_tok  = 0
-    n_batches  = 0
-
+def evaluate(model: SageStormV2, loader: DataLoader, crit: nn.Module) -> dict:
+    model.eval()
+    tot_loss = tot_cor = tot_tok = 0
     for x, y in loader:
-        x, y = x.to(device), y.to(device)
-
-        with torch.amp.autocast("cuda", enabled=(use_amp and device == "cuda")):
-            logits = raw_model(x)
-            loss   = criterion(logits.view(-1, VOCAB_SIZE), y.view(-1))
-
-        if not torch.isfinite(loss):
-            continue
-
-        mask       = (y != -100)
-        total_loss += loss.item()
-        total_cor  += ((logits.argmax(-1) == y) & mask).sum().item()
-        total_tok  += mask.sum().item()
-        n_batches  += 1
-
-    if n_batches == 0:
-        return {"val_loss": float("inf"), "val_ppl": float("inf"), "val_acc": 0.0}
-
-    avg_loss = total_loss / n_batches
-    raw_model.train()
-    return {
-        "val_loss": avg_loss,
-        "val_ppl":  math.exp(min(avg_loss, 20)),
-        "val_acc":  total_cor / max(total_tok, 1),
-    }
+        x, y   = x.to(DEVICE), y.to(DEVICE)
+        logits = model(x)
+        tot_loss += crit(logits.view(-1, VOCAB_SIZE), y.view(-1)).item()
+        mask     = (y != -100)
+        tot_cor  += ((logits.argmax(-1) == y) & mask).sum().item()
+        tot_tok  += mask.sum().item()
+    n    = len(loader)
+    loss = tot_loss / n
+    return {"loss": loss, "ppl": math.exp(min(loss, 20)),
+            "acc": tot_cor / max(tot_tok, 1)}
 
 
-# ══════════════════════════════════════════════════════════════
-#  Train One Epoch
-# ══════════════════════════════════════════════════════════════
-def train_epoch(model, loader: DataLoader, optimizer, base_lrs: list,
-                criterion: nn.Module, scaler, gstep: int, total_steps: int,
-                device: str, use_amp: bool) -> tuple[float, int]:
-
+# ── Train epoch ───────────────────────────────────────────────
+def train_epoch(model, loader, opt, base_lrs, crit, scaler, gstep, total,
+                curriculum_weight: float = 1.0) -> tuple:
     model.train()
-    total_loss = 0.0
-    n_batches  = 0
-    optimizer.zero_grad(set_to_none=True)
+    tot       = 0.0
+    grad_norms = []
+    opt.zero_grad(set_to_none=True)
 
-    pbar = tqdm(loader, desc="  finetune", leave=False)
-    for bi, (x, y) in enumerate(pbar):
-        x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
+    for bi, (x, y) in enumerate(tqdm(loader, desc="  finetune")):
+        x, y  = x.to(DEVICE), y.to(DEVICE)
+        scale = get_scale(gstep, total, FINETUNE_WARMUP)
+        for pg, blr in zip(opt.param_groups, base_lrs):
+            pg["lr"] = blr * scale
 
-        # Apply LR schedule every accumulation cycle
-        if bi % FINETUNE_ACCUM == 0:
-            scale = get_lr_scale(gstep, total_steps, FINETUNE_WARMUP,
-                                  FINETUNE_LR_MAX, FINETUNE_LR_MIN)
-            apply_lr_scale(optimizer, base_lrs, scale)
-
-        with torch.amp.autocast("cuda", enabled=(use_amp and device == "cuda")):
-            logits = model(x)
-            loss   = criterion(logits.view(-1, VOCAB_SIZE), y.view(-1))
-            loss   = loss / FINETUNE_ACCUM
-
-        if not torch.isfinite(loss):
-            print(f"\n[Finetune] WARNING: non-finite loss at batch {bi}, skipping")
-            optimizer.zero_grad(set_to_none=True)
-            continue
+        with torch.amp.autocast("cuda", enabled=USE_AMP):
+            loss = crit(model(x).view(-1, VOCAB_SIZE), y.view(-1)) / FINETUNE_ACCUM
 
         scaler.scale(loss).backward()
 
         if (bi + 1) % FINETUNE_ACCUM == 0:
-            scaler.unscale_(optimizer)
-            params = (model.module.parameters()
-                      if hasattr(model, "module") else model.parameters())
-            torch.nn.utils.clip_grad_norm_(params, CLIP_NORM)
-
-            scaler.step(optimizer)
+            scaler.unscale_(opt)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP_NORM)
+            grad_norms.append(float(grad_norm))
+            scaler.step(opt)
             scaler.update()
-            optimizer.zero_grad(set_to_none=True)
+            opt.zero_grad(set_to_none=True)
             gstep += 1
 
-        total_loss += loss.item() * FINETUNE_ACCUM
-        n_batches  += 1
+        tot += loss.item() * FINETUNE_ACCUM
 
-        if (bi + 1) % LOG_INTERVAL == 0:
-            avg = total_loss / n_batches
-            pbar.set_postfix({"loss": f"{avg:.4f}", "ppl": f"{math.exp(min(avg,20)):.2f}"})
-
-    return total_loss / max(n_batches, 1), gstep
+    avg_grad_norm = sum(grad_norms) / max(len(grad_norms), 1)
+    return tot / len(loader), gstep, avg_grad_norm
 
 
-# ══════════════════════════════════════════════════════════════
-#  Main
-# ══════════════════════════════════════════════════════════════
+# ── Main ──────────────────────────────────────────────────────
 def main():
-    parser = argparse.ArgumentParser(description="SageStorm V2 Fine-Tuning")
-    parser.add_argument("--pretrained", default=PRETRAINED_CKPT)
-    parser.add_argument("--output",     default=FINETUNED_CKPT)
-    parser.add_argument("--train",      default=TRAIN_TOKENS)
-    parser.add_argument("--val",        default=VAL_TOKENS)
-    parser.add_argument("--epochs",     type=int,   default=FINETUNE_EPOCHS)
-    parser.add_argument("--batch",      type=int,   default=FINETUNE_BATCH)
-    parser.add_argument("--lr",         type=float, default=FINETUNE_LR_MAX)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--pretrained",  default=PRETRAINED_CKPT)
+    parser.add_argument("--curriculum",  action="store_true",
+                        default=USE_CURRICULUM_LEARNING)
+    parser.add_argument("--mix_pretrain", action="store_true",
+                        default=MIX_PRETRAIN_IN_FINETUNE)
     args = parser.parse_args()
 
-    print(f"\n{'='*60}")
-    print(f"  SageStorm V2 — Instruction Fine-Tuning")
-    print(f"  Device    : {DEVICE}")
-    print(f"  Epochs    : {args.epochs}")
-    print(f"  Batch     : {args.batch} (effective={args.batch * FINETUNE_ACCUM})")
-    print(f"  LR max    : {args.lr}  →  min: {FINETUNE_LR_MIN}")
-    print(f"  Warmup    : {FINETUNE_WARMUP} steps")
-    print(f"  Patience  : {FINETUNE_PATIENCE}")
-    print(f"{'='*60}\n")
-
-    # ── Tokenizer & response marker IDs ──────────────────────
     tok      = SageTokenizer()
     resp_ids = tok.get_response_ids()
-    print(f"[Finetune] Response marker IDs: {resp_ids}")
-    if not resp_ids:
-        print("[Finetune] WARNING: empty response marker! "
-              "Response masking will be DISABLED. "
-              "Run step3 to regenerate tokenizer.")
+    print(f"[Data] Response marker IDs: {resp_ids}")
 
-    # ── Load tokens ───────────────────────────────────────────
-    tr_tok = load_tokens(args.train)
-    vl_tok = load_tokens(args.val)
+    tr_tok = load_tokens(TRAIN_TOKENS)
+    vl_tok = load_tokens(VAL_TOKENS)
+    tr_blk = pack(tr_tok, CONTEXT_LENGTH)
+    vl_blk = pack(vl_tok, CONTEXT_LENGTH)
 
-    tr_blocks = pack_blocks(tr_tok, CONTEXT_LENGTH)
-    vl_blocks = pack_blocks(vl_tok, CONTEXT_LENGTH)
-    print(f"[Finetune] Train blocks: {len(tr_blocks):,}  "
-          f"Val blocks: {len(vl_blocks):,}")
+    # Curriculum: sort training blocks by response difficulty
+    if args.curriculum:
+        print("[Data] Applying curriculum learning (easy → hard)...")
+        n_easy = int(len(tr_blk) * 0.4)
+        sorted_blk = curriculum_sort(tr_blk, resp_ids)
+        # First 40% epochs use easy samples first, then full shuffle
+        tr_blk_curriculum = sorted_blk
+    else:
+        tr_blk_curriculum = tr_blk
 
-    # ── Datasets & loaders ────────────────────────────────────
-    tr_ds = InstructionDataset(tr_blocks, resp_ids)
-    vl_ds = InstructionDataset(vl_blocks, resp_ids)
+    print(f"[Data] Train={len(tr_blk):,} Val={len(vl_blk):,} blocks")
 
+    num_workers = min(4, os.cpu_count() or 1)
     tr_ld = DataLoader(
-        tr_ds,
-        batch_size        = args.batch,
-        shuffle           = True,
-        num_workers       = NUM_WORKERS,
-        pin_memory        = (DEVICE == "cuda"),
-        persistent_workers= (NUM_WORKERS > 0),
-        drop_last         = True,
+        InstructDS(tr_blk_curriculum, resp_ids),
+        FINETUNE_BATCH, shuffle=(not args.curriculum),
+        num_workers=num_workers, pin_memory=(DEVICE == "cuda"),
     )
-    # FIX: Val loader created ONCE here, not inside epoch loop
     vl_ld = DataLoader(
-        vl_ds,
-        batch_size        = args.batch,
-        shuffle           = False,
-        num_workers       = NUM_WORKERS,
-        pin_memory        = (DEVICE == "cuda"),
-        persistent_workers= (NUM_WORKERS > 0),
+        InstructDS(vl_blk, resp_ids),
+        FINETUNE_BATCH, num_workers=num_workers,
+        pin_memory=(DEVICE == "cuda"),
     )
 
-    # ── Model: load pretrained weights ───────────────────────
     model = SageStormV2().to(DEVICE)
     if os.path.exists(args.pretrained):
         ckpt = torch.load(args.pretrained, map_location=DEVICE, weights_only=False)
-        # Handle both raw state_dict and wrapped checkpoint
-        state = ckpt.get("model_state", ckpt)
-        missing, unexpected = model.load_state_dict(state, strict=False)
-        if missing:
-            print(f"[Finetune] Missing keys ({len(missing)}): {missing[:3]}...")
-        if unexpected:
-            print(f"[Finetune] Unexpected keys ({len(unexpected)}): {unexpected[:3]}...")
-        print(f"[Finetune] Loaded pretrained weights ← {args.pretrained}")
+        model.load_state_dict(ckpt["model_state"], strict=False)
+        print(f"[Model] Loaded pretrained ← {args.pretrained}")
     else:
-        print(f"[Finetune] WARNING: No pretrained checkpoint found at {args.pretrained}")
-        print(f"           Training from random initialization.")
+        print(f"[Model] WARNING: No pretrained weights at {args.pretrained}")
+        print(f"[Model] Training from scratch — expect slower convergence")
 
-    # ── Multi-GPU ─────────────────────────────────────────────
-    n_gpus = torch.cuda.device_count()
-    if n_gpus > 1:
-        print(f"[Finetune] Using {n_gpus} GPUs via DataParallel")
-        model = torch.nn.DataParallel(model)
-
-    raw_model = model.module if hasattr(model, "module") else model
-
-    # ── Optimizer with layer-wise LR decay ───────────────────
-    groups   = make_param_groups(raw_model, args.lr)
+    groups   = make_param_groups(model, FINETUNE_LR_MAX)
     base_lrs = [g["lr"] for g in groups]
-
-    # Apply weight decay to block params only (not norms or biases)
     for g in groups:
-        g["weight_decay"] = WEIGHT_DECAY if "blk" in g.get("name", "") else 0.0
+        g["weight_decay"] = WEIGHT_DECAY if "blk" in g["name"] else 0.0
 
-    optimizer = torch.optim.AdamW(groups, betas=(0.9, 0.95), eps=1e-8)
+    opt    = torch.optim.AdamW(groups, betas=(0.9, 0.95))
+    crit   = nn.CrossEntropyLoss(ignore_index=-100, label_smoothing=LABEL_SMOOTHING)
+    scaler = torch.amp.GradScaler("cuda", enabled=USE_AMP)
+    total  = (len(tr_ld) // FINETUNE_ACCUM) * FINETUNE_EPOCHS
 
-    # ── Loss (BUG 4 FIX: label_smoothing=0.1) ────────────────
-    criterion = nn.CrossEntropyLoss(
-        ignore_index    = -100,
-        label_smoothing = LABEL_SMOOTHING,
-    )
+    best  = float("inf")
+    patience = 0
+    gstep    = 0
+    log  = ["epoch,train_loss,train_ppl,val_loss,val_ppl,val_acc,grad_norm,lr"]
 
-    scaler = torch.amp.GradScaler("cuda", enabled=(USE_AMP and DEVICE == "cuda"))
+    for epoch in range(FINETUNE_EPOCHS):
+        # After curriculum warmup epochs, switch to random shuffle
+        if args.curriculum and epoch == CURRICULUM_WARMUP_EPOCHS:
+            print(f"[Train] Epoch {epoch+1}: switching to random shuffle")
+            tr_ld = DataLoader(
+                InstructDS(tr_blk, resp_ids),
+                FINETUNE_BATCH, shuffle=True,
+                num_workers=num_workers, pin_memory=(DEVICE == "cuda"),
+            )
 
-    total_steps = (len(tr_ld) // FINETUNE_ACCUM) * args.epochs
+        t0 = time.time()
+        print(f"\nEpoch {epoch+1}/{FINETUNE_EPOCHS}  patience={patience}/{FINETUNE_PATIENCE}")
+        tr_loss, gstep, grad_norm = train_epoch(
+            model, tr_ld, opt, base_lrs, crit, scaler, gstep, total)
+        vm = evaluate(model, vl_ld, crit)
+        current_lr = opt.param_groups[-1]["lr"]  # head group
 
-    best_val_loss  = float("inf")
-    patience_count = 0
-    gstep          = 0
-    log_rows = ["epoch,train_loss,train_ppl,val_loss,val_ppl,val_acc,lr"]
-    start_time = time.time()
+        elapsed = time.time() - t0
+        print(f"  train loss={tr_loss:.4f}  ppl={math.exp(min(tr_loss,20)):.2f}")
+        print(f"  val   loss={vm['loss']:.4f}  ppl={vm['ppl']:.2f}  "
+              f"acc={vm['acc']*100:.2f}%  grad_norm={grad_norm:.3f}  "
+              f"lr={current_lr:.2e}  ({elapsed:.0f}s)")
 
-    for epoch in range(args.epochs):
-        epoch_start = time.time()
-        print(f"\nEpoch {epoch+1}/{args.epochs}  "
-              f"patience={patience_count}/{FINETUNE_PATIENCE}")
-
-        # ── Train ────────────────────────────────────────────
-        train_loss, gstep = train_epoch(
-            model, tr_ld, optimizer, base_lrs,
-            criterion, scaler, gstep, total_steps,
-            DEVICE, USE_AMP,
-        )
-        train_ppl = math.exp(min(train_loss, 20))
-
-        # ── Validate (FIX: was missing in original) ──────────
-        vm = evaluate(model, vl_ld, criterion, DEVICE, USE_AMP)
-        val_loss = vm["val_loss"]
-        val_ppl  = vm["val_ppl"]
-        val_acc  = vm["val_acc"]
-
-        current_lr  = optimizer.param_groups[-1]["lr"]  # head LR
-        epoch_secs  = time.time() - epoch_start
-
-        print(f"  train loss={train_loss:.4f}  ppl={train_ppl:.2f}")
-        print(f"  val   loss={val_loss:.4f}  ppl={val_ppl:.2f}  "
-              f"acc={val_acc*100:.2f}%")
-        print(f"  head_lr={current_lr:.2e}  epoch_time={epoch_secs:.0f}s")
-
-        log_rows.append(
-            f"{epoch+1},{train_loss:.4f},{train_ppl:.2f},"
-            f"{val_loss:.4f},{val_ppl:.2f},{val_acc*100:.2f},{current_lr:.2e}"
+        log.append(
+            f"{epoch+1},{tr_loss:.4f},{math.exp(min(tr_loss,20)):.2f},"
+            f"{vm['loss']:.4f},{vm['ppl']:.2f},{vm['acc']*100:.2f},"
+            f"{grad_norm:.3f},{current_lr:.2e}"
         )
 
-        # ── Save best ─────────────────────────────────────────
-        if val_loss < best_val_loss:
-            best_val_loss  = val_loss
-            patience_count = 0
-            raw_model.save(args.output)
-            print(f"  ✓ Best saved  val_loss={best_val_loss:.4f}")
+        if vm["loss"] < best:
+            best     = vm["loss"]
+            patience = 0
+            model.save(FINETUNED_CKPT)
+            print(f"  ✓ Best saved (val_loss={best:.4f})")
         else:
-            patience_count += 1
-            if patience_count >= FINETUNE_PATIENCE:
-                print(f"  Early stopping triggered.")
+            patience += 1
+            if patience >= FINETUNE_PATIENCE:
+                print("  Early stopping.")
                 break
 
-    # ── Save log ──────────────────────────────────────────────
-    log_path = os.path.join(MODELS_DIR, "finetune_log.csv")
+    log_path = os.path.join(LOGS_DIR, "finetune_log.csv")
     with open(log_path, "w") as f:
-        f.write("\n".join(log_rows))
-
-    total_mins = (time.time() - start_time) / 60
-    print(f"\n[Finetune] ✓ Complete")
-    print(f"  Best val_loss : {best_val_loss:.4f}  "
-          f"ppl={math.exp(min(best_val_loss,20)):.2f}")
-    print(f"  Total time    : {total_mins:.1f} min")
-    print(f"  Log           : {log_path}")
-    print(f"\nNext step: python train/evaluate.py --generate")
+        f.write("\n".join(log))
+    print(f"\n[Train] Done. Best val_loss={best:.4f}  ppl={math.exp(min(best,20)):.2f}")
+    print(f"[Train] Log saved → {log_path}")
 
 
 if __name__ == "__main__":

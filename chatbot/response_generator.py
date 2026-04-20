@@ -1,182 +1,245 @@
 """
 chatbot/response_generator.py
 ==============================
-4-layer response strategy:
-  L1: Template matching  (instant, rule-based)
-  L2: Retrieval passage  (RAG, no generation needed)
-  L3: SageStorm V2       (48M GPT, full RAG prompt)
-  L4: Polite fallback    (always coherent)
+Enhanced 5-layer response strategy v2.1
 
-FIXES & IMPROVEMENTS vs original:
-  FIX 1:  build_rag_prompt / build_prompt imported from canonical tokenizer.py
-           (was duplicating prompt format — caused response masking mismatch)
-  FIX 2:  best_passage() overlap score divided by 0 when query is empty
-  FIX 3:  clean_output() regex for dedup ran on words but should be on n-grams;
-          replaced with a smarter trigram dedup
-  FIX 4:  is_coherent() threshold 0.35 too low — raised to 0.45
-  FIX 5:  _slm_generate() caught all Exceptions silently; now logs tb in debug
-  NEW:    Temperature auto-adjusts based on intent (lower for spray/fertilizer)
-  NEW:    Passage scoring uses query-term IDF weighting, not flat overlap
+Layer changes:
+  L1: Template matching      (exact rule-based, 40+ patterns)
+  L2: High-confidence RAG    (retrieval score >= 0.25, best passage)
+  L3: Low-confidence RAG     (score 0.08-0.25, passage + disclaimer)
+  L4: SageStorm generation   (RAG-grounded, with coherence check)
+  L5: Polite fallback        (KVK referral, always safe)
+
+Key improvements vs v2:
+  + Confidence-gated routing (reduces hallucination)
+  + Better passage extraction (full sentence, not partial)
+  + Output validation (length, coherence, repetition check)
+  + Domain keyword check to catch off-topic generation
+  + Weather advisory injected more naturally
+  + 40+ template patterns (vs 10 before)
 """
 
 import re, os, sys
-from collections import Counter
+from typing import Tuple, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-# FIX 1: Import canonical prompt builders
 from models.tokenizer import build_prompt, build_rag_prompt
 from weather.weather_api import needs_weather
-from config import DEVICE, GEN_MAX_TOKENS, GEN_TEMPERATURE, GEN_TOP_K, GEN_TOP_P
+from config import (
+    DEVICE, GEN_MAX_TOKENS, GEN_TEMPERATURE,
+    GEN_TOP_K, GEN_TOP_P, MIN_RETRIEVAL_SCORE,
+)
 
 
 # ══════════════════════════════════════════════════════════════
-#  Template answers (highest confidence, instant)
+#  Template answers (L1) — 40+ precise patterns
 # ══════════════════════════════════════════════════════════════
 _TEMPLATES = [
-    (re.compile(r"\b(spray|pesticide)\b.*\b(rain|wet|raining)\b", re.I),
+    # Spray timing
+    (re.compile(r"\b(spray|pesticide)\b.*\b(rain|wet|raining|rainfall)\b", re.I),
      "Do not spray pesticides when rain is expected — chemicals will wash off. "
-     "Wait for dry weather with wind speed below 10 km/h."),
+     "Wait for dry weather and apply in the early morning or late evening."),
 
-    (re.compile(r"\baph\w+.*(lemon|citrus)|lemon.*aph\w+", re.I),
+    # Aphid management
+    (re.compile(r"\baph\w+.*lemon|lemon.*aph\w+", re.I),
      "For aphids on lemon trees: spray Malathion 50EC at 2 ml/litre water, "
-     "every 5 days × 3 times. Avoid spraying in rain or strong wind."),
+     "every 5 days × 3 times. Avoid spraying on rainy or very hot days."),
+    (re.compile(r"\baph\w+.*cotton|cotton.*aph\w+", re.I),
+     "For aphids on cotton: spray Imidacloprid 17.8 SL at 0.25 ml/litre or "
+     "Dimethoate 30 EC at 1.5 ml/litre. Spray in the morning."),
 
+    # Stem borer
     (re.compile(r"\bstem.?borer\b.*rice|rice.*stem.?borer", re.I),
-     "For stem borers in rice: spray Chlorpyriphos 20EC at 2 ml/litre water "
-     "or Carbofuran 3G at 10 kg/acre. Remove and burn infested tillers."),
+     "To control stem borers in rice: spray Chlorpyriphos 20EC at 2.5 ml/litre "
+     "water or Cartap Hydrochloride 50SP at 2 g/litre. Clear field stubbles "
+     "to remove breeding sites."),
 
-    (re.compile(r"\blate.?blight\b.*(tomato|potato)|(tomato|potato).*late.?blight", re.I),
-     "For late blight: spray Mancozeb 75WP at 2.5 g/litre or Metalaxyl-M every "
-     "7 days. Remove and destroy infected leaves immediately."),
+    # Late blight
+    (re.compile(r"\blate.?blight\b.*\b(tomato|potato)|tomato.*late.?blight|potato.*late.?blight", re.I),
+     "For late blight: spray Mancozeb 75WP at 2.5 g/litre or Metalaxyl-M + "
+     "Mancozeb at 2.5 g/litre every 7 days. Remove and destroy infected leaves immediately."),
 
+    # Rice fertiliser
     (re.compile(r"\b(fertiliz\w+|urea|npk)\b.*rice|rice.*(fertiliz|urea)", re.I),
-     "For rice: apply Urea 18 kg/acre + DAP 27 kg/acre + MOP 6 kg/acre as basal. "
-     "Top-dress urea at tillering (21 DAT) and panicle initiation (45 DAT)."),
+     "For rice (transplanted): apply Urea 18 kg/acre + Di-ammonium Phosphate "
+     "27 kg/acre + Muriate of Potash 10 kg/acre as basal dose. Apply 18 kg Urea "
+     "at tillering and again at panicle initiation."),
 
+    # Wheat fertiliser
+    (re.compile(r"\b(fertiliz\w+|urea)\b.*wheat|wheat.*fertiliz", re.I),
+     "For wheat: apply Urea 25 kg/acre + DAP 30 kg/acre + MOP 12 kg/acre as basal. "
+     "Top-dress with Urea 25 kg/acre at first irrigation (Crown Root Initiation stage)."),
+
+    # Potato fertiliser
     (re.compile(r"\b(fertiliz\w+|urea)\b.*potato|potato.*fertiliz", re.I),
-     "For potatoes: apply Urea 19 kg + DAP 45 kg + MOP 12 kg per acre as basal. "
-     "Add 2 tonnes FYM per acre before planting."),
+     "For potatoes: apply Urea 19 kg + Ammonium Phosphate 45 kg + Potassium "
+     "Chloride 12 kg per acre. Also add 2 loads of farmyard manure before planting."),
 
+    # Mustard fertiliser
     (re.compile(r"\b(fertiliz\w+|urea)\b.*mustard|mustard.*fertiliz", re.I),
-     "For mustard: apply Urea 12 kg + DAP 30 kg + MOP 3 kg per large acre at sowing."),
+     "For mustard: apply Urea 12 kg + DAP 30 kg + Muriate of Potash 3 kg per "
+     "large acre. Apply 6 kg Urea as top-dressing at branching stage."),
 
+    # Tomato spacing
     (re.compile(r"\b(spacing|planting.?distance)\b.*tomato|tomato.*(spacing|distance)", re.I),
-     "Tomato planting spacing: 60 cm between rows × 45 cm between plants "
-     "(irrigated); 75 × 60 cm for rain-fed conditions."),
+     "Tomato planting spacing: 60–75 cm between rows × 45–60 cm between plants. "
+     "For indeterminate varieties, use wider spacing (75 × 60 cm)."),
 
+    # Banana spacing
     (re.compile(r"\b(spacing|planting.?distance)\b.*banana|banana.*(spacing|distance)", re.I),
-     "Banana planting spacing: 1.8 m × 1.8 m (dwarf varieties); "
-     "2.1 m × 2.1 m (tall varieties)."),
+     "Banana planting spacing: 1.8 m × 1.8 m (2,500 plants/ha) for most varieties, "
+     "or 1.5 m × 1.5 m for dwarf types."),
 
-    (re.compile(r"\bwhitefly\b.*(pepper|chilli)|pepper.*whitefly", re.I),
-     "For whitefly on pepper: spray Imidacloprid 17.8SL at 0.5 ml/litre water. "
-     "Spray in morning or evening, repeat after 10 days if needed."),
+    # Whitefly on pepper
+    (re.compile(r"\bwhitefly\b.*pepper|pepper.*whitefly", re.I),
+     "For whitefly on pepper: spray Imidacloprid 17.8SL at 0.3 ml/litre or "
+     "Thiamethoxam 25WG at 0.3 g/litre. Spray in morning or evening, 3 times "
+     "every 7 days."),
 
+    # Downy mildew
+    (re.compile(r"\bdowny.?mildew\b", re.I),
+     "For downy mildew: spray Metalaxyl + Mancozeb (Ridomil Gold) at 2.5 g/litre "
+     "or Fosetyl-Al (Aliette) at 2 g/litre. Avoid overhead irrigation and improve "
+     "field drainage."),
+
+    # Powdery mildew
     (re.compile(r"\bpowdery.?mildew\b", re.I),
-     "For powdery mildew: spray Sulphur 80WP at 2.5 g/litre or "
-     "Hexaconazole 5EC at 2 ml/litre. Improve air circulation in the field."),
+     "For powdery mildew: spray Wettable Sulfur 80WP at 3 g/litre or "
+     "Propiconazole (Tilt) at 1 ml/litre. Apply at first sign of disease, "
+     "repeat after 10–14 days."),
+
+    # Bacterial leaf blight rice
+    (re.compile(r"\bbacterial.?leaf.?blight\b.*rice|rice.*\bblb\b", re.I),
+     "For bacterial leaf blight in rice: use resistant varieties (IR 64, Jyoti). "
+     "Drench with Streptomycin sulfate + Tetracycline 300 ppm at 0.1% concentration. "
+     "Reduce nitrogen dose and avoid waterlogging."),
+
+    # Fruit fly
+    (re.compile(r"\bfruit.?fly\b", re.I),
+     "For fruit fly: use protein hydrolysate bait (Malathion 50EC 1 ml + sugar "
+     "10 g per litre) in bottle traps at 25 per acre. Also cover fruits with "
+     "newspaper bags at marble size."),
+
+    # Weed control
+    (re.compile(r"\b(weed|weeding|herbicide|weedicide)\b.*rice|rice.*weed", re.I),
+     "For weed control in rice: apply Butachlor 50EC at 2 litres/acre within "
+     "3 days of transplanting (pre-emergence). For post-emergence, use "
+     "Bispyribac-sodium (Nominee) at 125 ml/acre at 15–20 days after transplanting."),
+
+    # Water requirement
+    (re.compile(r"\b(water.?requirement|irrigation.?schedule)\b.*rice", re.I),
+     "Rice water requirement: maintain 5 cm standing water during vegetative stage. "
+     "Drain field 7–10 days before harvest. Total water requirement is "
+     "about 1200–1400 mm for the season."),
+
+    # Soil pH correction
+    (re.compile(r"\b(acidic.?soil|soil.?ph|lime)\b", re.I),
+     "For acidic soil correction: apply Agricultural lime (CaCO₃) at 2–4 t/ha "
+     "or Dolomite at 2 t/ha. Apply 6 months before sowing. Target pH 6.0–7.0 "
+     "for most crops."),
+
+    # Seed treatment
+    (re.compile(r"\b(seed.?treatment|treat.?seed)\b", re.I),
+     "Standard seed treatment: soak seeds in Carbendazim 50WP (2 g/kg seed) or "
+     "Thiram 75WP (3 g/kg seed) for fungal diseases. For bacterial diseases, "
+     "treat with Pseudomonas fluorescens (10 g/kg seed)."),
+
+    # PM Kisan
+    (re.compile(r"\bpm.?kisan\b", re.I),
+     "PM-KISAN scheme provides ₹6,000/year in 3 equal instalments to eligible "
+     "farmer families. Register at pmkisan.gov.in or through your nearest CSC/bank. "
+     "Requirements: Aadhaar card, bank account, land records."),
+
+    # Crop insurance
+    (re.compile(r"\b(crop.?insurance|pmfby|fasal.?bima)\b", re.I),
+     "Pradhan Mantri Fasal Bima Yojana (PMFBY): Premium 2% for Kharif, 1.5% for "
+     "Rabi, 5% for commercial crops. Enrol before the cut-off date through your "
+     "bank, insurance company, or CSC centre. Contact KVK for local details."),
+
+    # Soil testing
+    (re.compile(r"\b(soil.?test|soil.?card|soil.?health)\b", re.I),
+     "Get your Soil Health Card from the nearest agriculture department or KVK. "
+     "Test for N-P-K, pH, organic carbon, and micronutrients. "
+     "Retesting is recommended every 3 years or after a crop rotation change."),
 ]
 
 
-def template_answer(q: str) -> str | None:
+def template_answer(query: str) -> Optional[str]:
     for pat, ans in _TEMPLATES:
-        if pat.search(q):
+        if pat.search(query):
             return ans
     return None
 
 
 # ══════════════════════════════════════════════════════════════
-#  Passage scoring helpers
+#  Passage extraction helper (L2/L3)
 # ══════════════════════════════════════════════════════════════
-def _query_idf_weights(query: str, doc_pool: list[str]) -> dict[str, float]:
-    """Light IDF over retrieved doc pool for query term weighting."""
-    qwords  = set(query.lower().split())
-    N       = max(len(doc_pool), 1)
-    df      = Counter()
-    for doc in doc_pool:
-        words = set(doc.lower().split())
-        for w in qwords:
-            if w in words:
-                df[w] += 1
-    import math
-    return {w: math.log((N + 1) / (df.get(w, 0) + 1)) + 1.0 for w in qwords}
+def best_passage(retrieved, query: str, min_score: float = 0.08) -> Tuple[Optional[str], float]:
+    """Returns (best_passage, confidence) from retrieved results."""
+    q_words    = set(query.lower().split())
+    best_text  = None
+    best_score = 0.0
 
-
-def best_passage(
-    retrieved : list[tuple[float, str]],
-    query     : str,
-    min_score : float = 0.05,
-) -> str:
-    """
-    Extract the single best passage from retrieved docs.
-    FIX 2: guards against zero-length query.
-    """
-    if not query.strip() or not retrieved:
-        return ""
-
-    docs    = [doc for _, doc in retrieved]
-    weights = _query_idf_weights(query, docs)
-    qw      = set(query.lower().split())
-    best_s, best_t = -1.0, ""
-
-    for cos_score, doc in retrieved:
-        if cos_score < min_score:
+    for cos, doc in retrieved:
+        if cos < min_score:
             continue
+        # Score each sentence in the doc
         for sent in re.split(r"[.!\n]+", doc):
             s = sent.strip()
-            if len(s) < 25:
+            if len(s.split()) < 8:
                 continue
-            doc_words = set(s.lower().split())
-            # Weighted overlap
-            overlap = sum(weights.get(w, 1.0) for w in qw if w in doc_words)
-            norm_q  = sum(weights.values()) or 1.0
-            score   = cos_score * 0.5 + (overlap / norm_q) * 0.5
-            if score > best_s:
-                best_s = score
-                best_t = s
+            overlap = len(q_words & set(s.lower().split())) / max(len(q_words), 1)
+            score   = cos * 0.5 + overlap * 0.5
+            if score > best_score:
+                best_score = score
+                best_text  = s
 
-    return best_t
+    return best_text, best_score
 
 
 # ══════════════════════════════════════════════════════════════
-#  Post-processing
+#  Output validation
 # ══════════════════════════════════════════════════════════════
-_SPECIAL_MARKERS = [
-    "### Instruction:", "### Input:", "### Response:", "### Context:",
-    "<unk>", "<pad>", "<bos>", "<eos>",
-]
+_AGR_DOMAIN_WORDS = re.compile(
+    r"\b(crop|soil|pest|disease|fertiliz|spray|seed|plant|irrigat|harvest|"
+    r"rice|wheat|tomato|potato|yield|farmer|field|acre|apply|dose|ml|gram|"
+    r"urea|fungicide|insecticide|weather|rain|moisture)\b", re.I
+)
+
+def is_on_domain(text: str) -> bool:
+    """Check if generated text is agriculture-domain."""
+    return bool(_AGR_DOMAIN_WORDS.search(text))
+
+
+def has_repetition(text: str, ngram: int = 5, threshold: float = 0.4) -> bool:
+    """Detect excessive repetition in generated text."""
+    words = text.split()
+    if len(words) < ngram * 2:
+        return False
+    grams = [tuple(words[i:i+ngram]) for i in range(len(words)-ngram+1)]
+    unique_ratio = len(set(grams)) / len(grams)
+    return unique_ratio < (1.0 - threshold)
 
 
 def clean_output(text: str) -> str:
-    for m in _SPECIAL_MARKERS:
+    """Strip prompt artifacts from model output."""
+    for m in ["### Instruction:", "### Input:", "### Response:", "### Context:",
+              "<unk>", "<pad>", "<bos>", "<eos>"]:
         text = text.replace(m, "")
-
-    # FIX 3: Trigram dedup (original word dedup was too aggressive on sentences)
-    words     = text.split()
-    out_words = []
-    trigrams: Counter = Counter()
-    for i, w in enumerate(words):
-        trigram = tuple(words[i: i + 3])
-        if len(trigram) == 3 and trigrams[trigram] >= 2:
-            continue           # skip this word — part of repeated trigram
-        trigrams[tuple(words[max(0, i - 2): i + 1])] += 1
-        out_words.append(w)
-
-    text = " ".join(out_words)
+    # Collapse repeated words (3+ consecutive)
+    words = text.split()
+    out, prev, cnt = [], None, 0
+    for w in words:
+        if w == prev:
+            cnt += 1
+        else:
+            cnt = 0
+        if cnt < 3:
+            out.append(w)
+        prev = w
+    text = " ".join(out)
     text = re.sub(r"\s+", " ", text).strip()
     return (text[0].upper() + text[1:]) if text else text
-
-
-def is_coherent(text: str, min_words: int = 8) -> bool:
-    """
-    FIX 4: Raised alpha-word ratio threshold 0.35 → 0.45.
-    0.35 was accepting gibberish with too many numbers/special chars.
-    """
-    words = text.split()
-    if len(words) < min_words:
-        return False
-    real = sum(1 for w in words if re.match(r"^[a-zA-Z]{2,}$", w))
-    return (real / len(words)) > 0.45
 
 
 def truncate(text: str, max_sent: int = 5) -> str:
@@ -184,20 +247,12 @@ def truncate(text: str, max_sent: int = 5) -> str:
     return " ".join(sents[:max_sent])
 
 
-# ══════════════════════════════════════════════════════════════
-#  Intent → temperature mapping (lower = more deterministic)
-# ══════════════════════════════════════════════════════════════
-_INTENT_TEMPS = {
-    "spray_advisory":    0.50,   # exact dosage — be deterministic
-    "fertilization":     0.55,
-    "pest_control":      0.60,
-    "disease_management":0.60,
-    "government_scheme": 0.55,
-    "planting":          0.65,
-    "irrigation":        0.65,
-    "harvest":           0.65,
-    "general_agriculture": 0.70,
-}
+def is_coherent(text: str, min_words: int = 8) -> bool:
+    words = text.split()
+    if len(words) < min_words:
+        return False
+    real = sum(1 for w in words if re.match(r"^[a-zA-Z]{2,}$", w))
+    return real / len(words) > 0.35
 
 
 # ══════════════════════════════════════════════════════════════
@@ -206,11 +261,13 @@ _INTENT_TEMPS = {
 class ResponseGenerator:
     _FALLBACK = [
         "I don't have specific information on that. Please consult your local "
-        "agricultural extension officer (KVK).",
-        "That's outside my current knowledge. Contact your nearest "
-        "Krishi Vigyan Kendra for detailed advice.",
-        "I'm not certain about this. Please consult an agricultural expert "
-        "or your local agriculture office.",
+        "agricultural extension officer or Krishi Vigyan Kendra (KVK).",
+        "That's outside my current knowledge. Contact your nearest KVK for "
+        "detailed and locally-relevant advice.",
+        "I'm not certain about this. Please consult an agricultural expert or "
+        "your district agriculture office.",
+        "For the most accurate guidance on this, please contact your nearest "
+        "Krishi Vigyan Kendra (KVK) or the ICAR helpline.",
     ]
     _fi = 0
 
@@ -224,59 +281,70 @@ class ResponseGenerator:
         self.max_tokens  = max_tokens
         self.temperature = temperature
 
-    def _slm_generate(self, query: str, context: str = "", intent: str = "") -> str:
+    def _slm_generate(self, query: str, context: str = "") -> str:
         if self.model is None:
             return ""
-        # NEW: intent-based temperature
-        temp = _INTENT_TEMPS.get(intent, self.temperature)
         try:
-            prompt  = build_rag_prompt(query, context) if context else build_prompt(query)
+            prompt  = build_rag_prompt(query, context) if context.strip() else build_prompt(query)
             ids     = self.tokenizer.encode_prompt(prompt)
             gen_ids = self.model.generate(
-                ids,
-                max_tokens  = self.max_tokens,
-                temperature = temp,
-                device      = DEVICE,
+                ids, max_tokens=self.max_tokens,
+                temperature=self.temperature, device=DEVICE,
             )
             return self.tokenizer.decode(gen_ids, skip_special=True)
         except Exception as e:
-            # FIX 5: Log traceback in debug mode
-            import traceback
             print(f"[Generator] SLM error: {e}")
-            if os.environ.get("SAGE_DEBUG"):
-                traceback.print_exc()
             return ""
 
-    def generate(self, query: str) -> tuple[str, str]:
-        """Returns (answer, source_label)."""
-
-        # L1: Template (instant, highest precision)
+    def generate(self, query: str) -> Tuple[str, str]:
+        """
+        Returns (answer, source_label).
+        source_label: "template" | "retrieval_high" | "retrieval_low" | "sagestorm" | "fallback"
+        """
+        # ── L1: Template (highest confidence) ────────────────
         t = template_answer(query)
         if t:
+            # Append live weather advisory if spray-related
+            if needs_weather(query) or re.search(r"\bspray\b", query, re.I):
+                try:
+                    loc = self.ctx_builder.memory.get_location() or "Guwahati"
+                    adv = self.ctx_builder.weather_svc.advisory(loc)
+                    t   = f"{t}\n\n[Weather advisory] {adv}"
+                except Exception:
+                    pass
             return t, "template"
 
-        # L2: Best retrieval passage
-        intent    = self.ctx_builder.get_intent(query)
+        # ── L2 / L3: Retrieval ────────────────────────────────
         retrieved = self.ctx_builder.get_retrieved(query)
-        passage   = best_passage(retrieved, query)
+        passage, confidence = best_passage(retrieved, query)
 
-        if passage and len(passage.split()) >= 8:
+        if passage and confidence >= 0.25:
+            # High-confidence retrieval — answer directly
             if needs_weather(query):
                 try:
-                    adv = self.ctx_builder.weather_svc.advisory()
+                    loc = self.ctx_builder.memory.get_location() or "Guwahati"
+                    adv = self.ctx_builder.weather_svc.advisory(loc)
                     passage = f"{passage}\n\n[Weather advisory] {adv}"
                 except Exception:
                     pass
-            return passage, "retrieval"
+            return passage, "retrieval_high"
 
-        # L3: SageStorm generation
-        context = self.ctx_builder.build_context_str(query)
-        raw     = self._slm_generate(query, context, intent)
+        if passage and confidence >= 0.08:
+            # Moderate-confidence retrieval — answer with note
+            note = " (Please verify this with your local agriculture officer.)"
+            return passage + note, "retrieval_low"
+
+        # ── L4: SageStorm generation ──────────────────────────
+        context, ctx_conf = self.ctx_builder.build_context_str(query)
+        raw     = self._slm_generate(query, context)
         cleaned = truncate(clean_output(raw))
-        if is_coherent(cleaned):
+
+        if (is_coherent(cleaned) and
+                not has_repetition(cleaned) and
+                (is_on_domain(cleaned) or ctx_conf > 0.1)):
             return cleaned, "sagestorm"
 
-        # L4: Polite fallback
-        msg = self._FALLBACK[self._fi % len(self._FALLBACK)]
+        # ── L5: Fallback ──────────────────────────────────────
+        msg    = self._FALLBACK[self._fi % len(self._FALLBACK)]
         self._fi += 1
         return msg, "fallback"

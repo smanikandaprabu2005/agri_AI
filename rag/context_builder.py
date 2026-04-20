@@ -1,193 +1,210 @@
 """
-rag/context_builder.py  —  SageStorm V2.1
-==========================================
-Key upgrades over V2:
-  - Hybrid retrieval: dense (Word2Vec cosine) + sparse (BM25 keyword score)
-  - Context window doubled: 600 → 1200 chars (config.RAG_CONTEXT_MAX)
-  - Snippet deduplication: skip snippets overlapping with already-used text
-  - Richer weather integration: includes advisory text, not just raw data
-  - Intent-aware snippet selection: match snippets closer to detected intent
-  - Source quality score: prefer longer, more informative snippets
+rag/context_builder.py
+======================
+Enhanced RAG context builder v2.1
+
+Improvements over v2:
+  + Richer intent detection (12 categories vs 6)
+  + Context deduplication — avoids repeating same facts
+  + Passage quality scoring (length, keyword density, coherence)
+  + Context truncation respects sentence boundaries
+  + Weather advisory integrated more naturally
+  + Confidence score returned with context
 """
 
-import re
-import os
-import sys
-import math
-from collections import Counter
+import re, os, sys
+from typing import List, Tuple, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from weather.weather_api import needs_weather
+from config import CONTEXT_LENGTH, MIN_RETRIEVAL_SCORE
 
-# ── Import RAG_CONTEXT_MAX from config (new in V2.1) ────────
-try:
-    from config import RAG_CONTEXT_MAX
-except ImportError:
-    RAG_CONTEXT_MAX = 1200   # fallback if using old config.py
+# ── Intent patterns (order matters — first match wins) ────────
+_INTENTS = [
+    ("pest_control",        re.compile(
+        r"\b(pest|insect|aphid|worm|caterpillar|fly|beetle|mite|thrip|"
+        r"whitefly|stem.?borer|termite|leafhopper|mealy.?bug|scale|nematode)\b", re.I)),
+    ("disease_management",  re.compile(
+        r"\b(disease|blight|rot|wilt|mildew|fungal|bacterial|viral|spot|"
+        r"rust|leaf.?curl|anthracnose|blast|canker|mosaic|yellowing|die.?back)\b", re.I)),
+    ("fertilization",       re.compile(
+        r"\b(fertiliz|urea|potash|phosphate|npk|nutrient|manure|compost|"
+        r"dap|ssp|zinc|boron|micronutrient|top.?dress)\b", re.I)),
+    ("spray_advisory",      re.compile(
+        r"\b(spray|pesticide|fungicide|insecticide|dose|dosage|ml|gram|litre|"
+        r"dilut|mix|knapsack|wettable)\b", re.I)),
+    ("irrigation",          re.compile(
+        r"\b(irrigat|water|drip|sprinkler|flood|furrow|moisture|drought|"
+        r"rainwater|rain.?fed|dry)\b", re.I)),
+    ("planting",            re.compile(
+        r"\b(plant|sow|seed|seedling|transplant|cultivat|growing|spacing|"
+        r"density|nursery|germination|dibbling)\b", re.I)),
+    ("harvesting",          re.compile(
+        r"\b(harvest|mature|pick|yield|post.?harvest|storage|grade|pack)\b", re.I)),
+    ("soil_management",     re.compile(
+        r"\b(soil|ph|alkaline|acidic|loam|clay|sandy|alluvial|organic.?matter|"
+        r"tillage|plough|compost|vermi)\b", re.I)),
+    ("crop_variety",        re.compile(
+        r"\b(variet|cultivar|hybrid|variety|species|breed|heirloom|dwarf|"
+        r"high.?yield)\b", re.I)),
+    ("government_scheme",   re.compile(
+        r"\b(scheme|yojna|yojana|subsid|loan|kcc|pm.?kisan|krishi|kvk|"
+        r"fasal.?bima|pmfby|nabard|insurance)\b", re.I)),
+    ("livestock",           re.compile(
+        r"\b(cow|buffalo|goat|pig|poultry|chicken|cattle|dairy|milch|"
+        r"vaccination|deworming|veterinar|animal)\b", re.I)),
+    ("general_agriculture", re.compile(r".*", re.I)),  # catch-all
+]
 
 
-# ── Intent detection ─────────────────────────────────────────
-_PEST    = re.compile(r"\b(pest|insect|aphid|worm|caterpillar|fly|beetle|mite|thrips|whitefly|stem borer|termite|bug|grub|larva)\b", re.I)
-_DISEASE = re.compile(r"\b(disease|blight|rot|wilt|mildew|fungal|bacterial|viral|spot|rust|leaf curl|anthracnose|blast|canker|scab|mosaic)\b", re.I)
-_FERT    = re.compile(r"\b(fertiliz|urea|potash|phosphate|npk|nutrient|manure|compost|dap|mop|fym|micronutrient)\b", re.I)
-_SPRAY   = re.compile(r"\b(spray|pesticide|fungicide|insecticide|dose|dosage|ml|litre|concentration)\b", re.I)
-_PLANT   = re.compile(r"\b(plant|sow|seed|seedling|transplant|cultivat|growing|spacing|nursery)\b", re.I)
-_HARVEST = re.compile(r"\b(harvest|yield|mature|pick|cut|store|storage|post.harvest)\b", re.I)
-_SOIL    = re.compile(r"\b(soil|ph|loamy|sandy|clay|drainage|tilling|plough|bed|organic matter)\b", re.I)
-_WATER   = re.compile(r"\b(irrigat|water|drip|sprinkler|flood|rain|moisture|drought)\b", re.I)
-
-
-def detect_intent(q: str) -> str:
-    if _PEST.search(q):    return "pest_control"
-    if _DISEASE.search(q): return "disease_management"
-    if _FERT.search(q):    return "fertilization"
-    if _SPRAY.search(q):   return "spray_advisory"
-    if _HARVEST.search(q): return "harvesting"
-    if _SOIL.search(q):    return "soil_management"
-    if _WATER.search(q):   return "irrigation"
-    if _PLANT.search(q):   return "planting"
+def detect_intent(query: str) -> str:
+    for intent, pattern in _INTENTS:
+        if pattern.search(query):
+            return intent
     return "general_agriculture"
 
 
-# ── BM25 lightweight scorer ───────────────────────────────────
-class BM25Scorer:
+# ── Passage quality scoring ───────────────────────────────────
+def _passage_quality(passage: str, query: str) -> float:
     """
-    Lightweight BM25 (no external deps) for keyword-based relevance.
-    Used alongside dense cosine score for hybrid retrieval.
+    Score passage quality (0-1) based on:
+    - Length (prefer 15–80 words)
+    - Query term overlap
+    - Absence of noise tokens
     """
-    def __init__(self, k1: float = 1.5, b: float = 0.75):
-        self.k1 = k1
-        self.b  = b
+    words   = passage.split()
+    n       = len(words)
+    if n < 5:
+        return 0.0
 
-    def _tokenize(self, text: str) -> list:
-        return re.findall(r"[a-zA-Z]+", text.lower())
+    # Length score (bell curve centred at 40 words)
+    length_score = min(n / 40, 1.0) * max(0, 1 - max(0, n - 80) / 80)
 
-    def score(self, query: str, document: str) -> float:
-        q_terms  = self._tokenize(query)
-        d_tokens = self._tokenize(document)
-        if not d_tokens or not q_terms:
-            return 0.0
-        dl     = len(d_tokens)
-        avgdl  = 150.0   # typical agricultural sentence length
-        tf     = Counter(d_tokens)
-        score  = 0.0
-        df_est = 0.5     # simplified: assume each term appears in ~50% of docs
-        for term in set(q_terms):
-            f = tf.get(term, 0)
-            if f == 0:
-                continue
-            idf = math.log((1.0 - df_est + 0.5) / (df_est + 0.5) + 1.0)
-            tf_norm = (f * (self.k1 + 1)) / (f + self.k1 * (1 - self.b + self.b * dl / avgdl))
-            score += idf * tf_norm
-        return score
+    # Keyword overlap
+    q_terms  = set(query.lower().split())
+    p_terms  = set(w.lower() for w in words)
+    overlap  = len(q_terms & p_terms) / max(len(q_terms), 1)
+
+    # Penalise noisy passages (mostly numbers, special chars)
+    alpha_words = sum(1 for w in words if re.match(r"^[a-zA-Z]{2,}$", w))
+    coherence   = alpha_words / max(n, 1)
+
+    return 0.3 * length_score + 0.4 * overlap + 0.3 * coherence
 
 
-_bm25 = BM25Scorer()
+def _dedup_passages(passages: List[str], threshold: float = 0.7) -> List[str]:
+    """Remove near-duplicate passages using Jaccard similarity."""
+    if not passages:
+        return passages
+    unique = [passages[0]]
+    for p in passages[1:]:
+        p_toks = set(p.lower().split())
+        is_dup = False
+        for u in unique:
+            u_toks = set(u.lower().split())
+            inter  = len(p_toks & u_toks)
+            union  = len(p_toks | u_toks)
+            if union > 0 and inter / union >= threshold:
+                is_dup = True
+                break
+        if not is_dup:
+            unique.append(p)
+    return unique
 
 
-# ── Snippet quality score ─────────────────────────────────────
-def snippet_quality(text: str, query: str, intent: str) -> float:
-    """
-    Combines:
-      - length (longer → more informative, up to 80 words)
-      - overlap with query terms
-      - presence of intent-specific keywords
-    """
-    words = text.split()
-    length_score = min(len(words) / 80.0, 1.0)
-
-    q_words    = set(query.lower().split())
-    d_words    = set(text.lower().split())
-    overlap    = len(q_words & d_words) / max(len(q_words), 1)
-
-    # intent keywords boost
-    intent_bonus = 0.0
-    intent_kw = {
-        "pest_control":       r"\b(spray|dose|ml|litre|control|apply)\b",
-        "disease_management": r"\b(fungicide|spray|dose|remove|destroy)\b",
-        "fertilization":      r"\b(apply|kg|acre|dose|nitrogen|phosphate|potash)\b",
-        "spray_advisory":     r"\b(avoid|rain|weather|morning|evening)\b",
-        "planting":           r"\b(spacing|cm|distance|row|depth|transplant)\b",
-        "harvesting":         r"\b(days|mature|colour|size|stage|yield)\b",
-        "soil_management":    r"\b(ph|loam|clay|organic|compost|drainage)\b",
-        "irrigation":         r"\b(days|interval|drip|litre|mm|moisture)\b",
-    }
-    if intent in intent_kw:
-        if re.search(intent_kw[intent], text, re.I):
-            intent_bonus = 0.3
-
-    return 0.4 * length_score + 0.4 * overlap + 0.2 * intent_bonus
+def _truncate_to_sentences(text: str, max_chars: int) -> str:
+    """Truncate text at a sentence boundary rather than mid-word."""
+    if len(text) <= max_chars:
+        return text
+    # Find last sentence end before max_chars
+    sub = text[:max_chars]
+    for end_char in [".", "!", "?"]:
+        idx = sub.rfind(end_char)
+        if idx > max_chars // 2:
+            return sub[: idx + 1].strip()
+    # Fallback: truncate at last space
+    idx = sub.rfind(" ")
+    return (sub[:idx].strip() + "…") if idx > 0 else sub.strip()
 
 
-# ── Main context builder ──────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
+#  Context Builder
+# ══════════════════════════════════════════════════════════════
 class ContextBuilder:
-    def __init__(self, retriever, memory, weather_svc, top_k: int = 5):
+    """
+    Assembles the RAG prompt context from:
+      1. Retrieved passages (BM25/hybrid, quality-filtered)
+      2. Weather advisory (when relevant)
+      3. Farmer memory profile (location, crop, soil)
+
+    Context budget: 700 characters (fits well in 768-token context).
+    """
+    MAX_CONTEXT_CHARS = 700
+
+    def __init__(self, retriever, memory, weather_svc, top_k: int = 7):
         self.retriever   = retriever
         self.memory      = memory
         self.weather_svc = weather_svc
         self.top_k       = top_k
-        self._ctx_max    = RAG_CONTEXT_MAX
 
-    # ── Hybrid retrieval: dense + BM25 ───────────────────────
-    def _hybrid_retrieve(self, query: str, top_k: int) -> list:
+    def build_context_str(self, query: str) -> Tuple[str, float]:
         """
-        Returns list of (hybrid_score, doc_text) sorted descending.
-        Hybrid score = 0.65 × dense_cosine + 0.35 × normalised_bm25.
+        Returns (context_string, confidence_score).
+        confidence_score in [0,1] — how good the retrieved context is.
         """
-        dense_results = self.retriever.retrieve(query, top_k=top_k * 2)
+        intent    = detect_intent(query)
+        retrieved = self.retriever.retrieve(query, top_k=self.top_k)
 
-        # BM25 scores
-        bm25_scores = [(_bm25.score(query, doc), doc) for _, doc in dense_results]
-        max_bm25    = max((s for s, _ in bm25_scores), default=1.0)
-        if max_bm25 == 0:
-            max_bm25 = 1.0
+        # Filter by minimum score
+        retrieved = [(s, d) for s, d in retrieved if s >= MIN_RETRIEVAL_SCORE]
 
-        hybrid = []
-        for (cos, doc), (bm25_raw, _) in zip(dense_results, bm25_scores):
-            norm_bm25  = bm25_raw / max_bm25
-            hyb        = 0.65 * cos + 0.35 * norm_bm25
-            hybrid.append((hyb, doc))
+        # Score and rank passages by quality
+        scored_passages = []
+        for score, doc in retrieved[:5]:
+            # Extract best sentence from doc
+            sents = re.split(r"[.!\n]+", doc)
+            best_sent  = ""
+            best_score = 0.0
+            for sent in sents:
+                sent = sent.strip()
+                if len(sent) < 20:
+                    continue
+                q_score = _passage_quality(sent, query)
+                if q_score > best_score:
+                    best_score = q_score
+                    best_sent  = sent
+            if best_sent:
+                scored_passages.append((score * best_score, best_sent))
 
-        hybrid.sort(key=lambda x: x[0], reverse=True)
-        return hybrid[:top_k]
+        # Sort by combined score
+        scored_passages.sort(key=lambda x: -x[0])
+        passages = [p for _, p in scored_passages]
+        passages = _dedup_passages(passages)
 
-    # ── Main context string ───────────────────────────────────
-    def build_context_str(self, query: str) -> str:
-        """
-        Build RAG context string up to RAG_CONTEXT_MAX chars.
-        Uses hybrid retrieval + intent-aware quality scoring.
-        """
-        intent   = detect_intent(query)
-        results  = self._hybrid_retrieve(query, self.top_k)
-        parts    = []
-        used_text = set()
+        parts       = []
+        used_chars  = 0
+        confidence  = 0.0
 
-        for i, (score, doc) in enumerate(results[:4], 1):
-            if score < 0.05:
-                continue
-
-            # intent-aware quality filtering
-            qual = snippet_quality(doc, query, intent)
-            if qual < 0.15:
-                continue
-
-            # deduplication: skip if >40% of words already covered
-            words = set(doc.lower().split())
-            overlap_ratio = len(words & used_text) / max(len(words), 1)
-            if overlap_ratio > 0.40:
-                continue
-            used_text.update(words)
-
-            # take up to 80 words per snippet
-            snippet = " ".join(doc.split()[:80])
+        for i, (combo_score, passage) in enumerate(zip(
+            [s for s, _ in scored_passages], passages
+        ), 1):
+            snippet = _truncate_to_sentences(passage, 180)
+            if used_chars + len(snippet) > self.MAX_CONTEXT_CHARS - 100:
+                break
             parts.append(f"[{i}] {snippet}")
+            used_chars += len(snippet) + 6
+            confidence  = max(confidence, combo_score)
 
-        # Weather integration
-        if needs_weather(query) or intent == "spray_advisory":
-            loc = self.memory.get_location()
+        # Weather block
+        weather_needed = (
+            needs_weather(query)
+            or intent in ("spray_advisory", "irrigation")
+        )
+        if weather_needed:
+            loc = self.memory.get_location() or "Guwahati"
             try:
-                w_ctx = self.weather_svc.context_str(loc)
-                parts.append("[Weather]\n" + w_ctx)
+                weather_str = self.weather_svc.context_str(loc)
+                parts.append(f"[Weather] {weather_str}")
             except Exception:
                 pass
 
@@ -196,24 +213,20 @@ class ContextBuilder:
         if profile and profile != "No profile yet.":
             parts.append(f"[Farmer] {profile}")
 
-        full_ctx = "\n\n".join(parts)
-        # Truncate to configured limit, but don't cut mid-word
-        if len(full_ctx) > self._ctx_max:
-            full_ctx = full_ctx[: self._ctx_max]
-            last_space = full_ctx.rfind(" ")
-            if last_space > self._ctx_max - 80:
-                full_ctx = full_ctx[:last_space]
+        context = "\n\n".join(parts)
+        return _truncate_to_sentences(context, self.MAX_CONTEXT_CHARS), confidence
 
-        return full_ctx
-
-    # ── Helpers used by response generator ───────────────────
-    def get_retrieved(self, query: str) -> list:
-        """Return raw dense retrieval results (for response_generator.py)."""
+    def get_retrieved(self, query: str):
+        """Raw retrieval results (for L2 passage extraction)."""
         return self.retriever.retrieve(query, top_k=self.top_k)
-
-    def get_hybrid(self, query: str) -> list:
-        """Return hybrid retrieval results."""
-        return self._hybrid_retrieve(query, self.top_k)
 
     def get_intent(self, query: str) -> str:
         return detect_intent(query)
+
+    def get_confidence(self, query: str) -> float:
+        """Quick confidence check without building full context."""
+        results = self.retriever.retrieve(query, top_k=3)
+        if not results:
+            return 0.0
+        top_score = results[0][0]
+        return float(top_score)

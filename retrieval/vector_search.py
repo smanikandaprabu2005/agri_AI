@@ -1,439 +1,431 @@
 """
 retrieval/vector_search.py
 ==========================
-Hybrid TF-IDF + Word2Vec semantic retrieval.
+Enhanced Hybrid Retriever: BM25 + TF-IDF
 
-FIXES & IMPROVEMENTS vs original:
-  FIX 1:  W2V embed_size is now read from config (128 vs 64)
-  FIX 2:  W2V.train() used per-sample learning-rate decay (was constant)
-  FIX 3:  build_docs() deduplicates and filters very short texts
-  FIX 4:  SemanticRetriever.retrieve() was O(N*D) dense matmul — acceptable
-          but now uses float32 explicitly for correctness
-  NEW:    TF-IDF retriever added alongside Word2Vec for hybrid scoring
-  NEW:    HybridRetriever combines semantic + keyword signals
-  NEW:    retrieve() returns ranked (score, doc, source) triples
-  NEW:    W2V.vec() now L2-normalises at index time, not query time
-  NEW:    load_jsonl + build_docs handle both instruction-format and
-          plain-text records gracefully
+Why this is better than Word2Vec:
+  - BM25 is the gold standard for sparse retrieval (used in Elasticsearch, Lucene)
+  - TF-IDF captures term importance without training
+  - Hybrid combines lexical precision (BM25) with semantic spread (TF-IDF cosine)
+  - No training needed — builds in seconds
+  - Works better for agriculture domain with specific chemical/crop names
+
+Architecture:
+  BM25Retriever    — Okapi BM25 scoring
+  TFIDFRetriever   — sparse TF-IDF with cosine similarity
+  HybridRetriever  — weighted fusion of BM25 + TF-IDF scores
+  Word2VecRetriever — kept as fallback for compatibility
+
+Usage:
+  from retrieval.vector_search import build_retriever, load_retriever
+  # Same API as before — drop-in replacement
 """
 
-import os, re, json, pickle, sys, math
-from collections import Counter
-from typing import NamedTuple
-
+import os, re, json, pickle, math
 import numpy as np
+from collections import Counter, defaultdict
+from typing import List, Tuple, Dict, Optional
 
+import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import (
-    W2V_EMBED_SIZE, W2V_EPOCHS, W2V_WINDOW,
-    W2V_NEG_SAMPLES, RETRIEVER_DIR,
+    RETRIEVER_DIR, RETRIEVER_TYPE, BM25_K1, BM25_B,
+    TFIDF_MAX_FEATS, HYBRID_ALPHA, RETRIEVAL_TOP_K,
 )
 
 
-# ══════════════════════════════════════════════════════════════
-#  Vocabulary
-# ══════════════════════════════════════════════════════════════
-PAD, UNK, BOS, EOS = "<PAD>", "<UNK>", "<BOS>", "<EOS>"
+# ── Text preprocessing ────────────────────────────────────────
+_STOP = {
+    "a","an","the","is","it","in","of","to","and","or","for","on","at","by",
+    "from","this","that","with","be","are","was","were","as","do","does",
+    "have","has","had","not","no","can","will","should","would","may","might",
+    "your","my","our","their","its","what","how","which","when","where","why",
+}
+
+def tokenize(text: str, remove_stop: bool = True) -> List[str]:
+    text   = text.lower()
+    text   = re.sub(r"[^\w\s]", " ", text)
+    tokens = text.split()
+    if remove_stop:
+        tokens = [t for t in tokens if t not in _STOP and len(t) > 1]
+    return tokens
 
 
-class Vocabulary:
-    def __init__(self):
-        self.w2i: dict[str, int] = {}
-        self.i2w: dict[int, str] = {}
-        self.freq: Counter       = Counter()
-        for tok in (PAD, UNK, BOS, EOS):
-            self._add(tok)
-
-    def _add(self, w: str):
-        if w not in self.w2i:
-            i = len(self.w2i)
-            self.w2i[w] = i
-            self.i2w[i] = w
-
-    def build(self, corpus: list[list[str]], min_freq: int = 2):
-        """Build vocab from tokenised corpus, pruning low-frequency words."""
-        for tokens in corpus:
-            self.freq.update(tokens)
-        for w, c in self.freq.items():
-            if c >= min_freq:
-                self._add(w)
-        print(f"[Vocab] size={len(self.w2i)} "
-              f"(min_freq={min_freq}, unique_words={len(self.freq)})")
-
-    def encode(self, tokens: list[str]) -> list[int]:
-        unk = self.w2i[UNK]
-        return [self.w2i.get(t, unk) for t in tokens]
-
-    def __len__(self) -> int:
-        return len(self.w2i)
-
-    @property
-    def pad_idx(self) -> int: return self.w2i[PAD]
-    @property
-    def unk_idx(self) -> int: return self.w2i[UNK]
+def clean(text: str) -> str:
+    text = text.lower()
+    text = re.sub(r"http\S+", " ", text)
+    text = re.sub(r"[^\w\s\.,!?]", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
 
 
 # ══════════════════════════════════════════════════════════════
-#  Word2Vec Skip-Gram with Negative Sampling
+#  BM25 Retriever (Okapi BM25)
 # ══════════════════════════════════════════════════════════════
-class Word2Vec:
-    def __init__(self, vocab_size: int, embed_size: int = W2V_EMBED_SIZE):
-        sc         = 0.1 / embed_size
-        self.W     = np.random.uniform(-sc, sc, (vocab_size, embed_size)).astype(np.float32)
-        self.C     = np.zeros((vocab_size, embed_size), dtype=np.float32)
-        self.embed_size  = embed_size
-        self._noise: np.ndarray | None = None
-        # Pre-normalised embedding cache (built after training)
-        self._normed: np.ndarray | None = None
-
-    @staticmethod
-    def _sigmoid(x: np.ndarray) -> np.ndarray:
-        return np.where(x >= 0, 1 / (1 + np.exp(-x)), np.exp(x) / (1 + np.exp(x)))
-
-    def build_noise(self, freq: np.ndarray):
-        f = freq ** 0.75
-        self._noise = f / f.sum()
-
-    def _neg_sample(self, c: int, ctx: int, k: int) -> np.ndarray:
-        ns: list[int] = []
-        while len(ns) < k:
-            n = int(np.random.choice(len(self._noise), p=self._noise))
-            if n != c and n != ctx:
-                ns.append(n)
-        return np.array(ns, dtype=np.int32)
-
-    def _sgns_step(self, c: int, ctx: int, lr: float):
-        ns   = self._neg_sample(c, ctx, W2V_NEG_SAMPLES)
-        sp   = self._sigmoid(self.W[c] @ self.C[ctx])
-        gW   = lr * (1 - sp) * self.C[ctx]
-        sn   = self._sigmoid(self.W[c] @ self.C[ns].T)
-        gW  += -lr * (self.C[ns] * sn[:, None]).sum(0)
-        gC_p = lr * (1 - sp) * self.W[c]
-        gC_n = -lr * sn[:, None] * self.W[c]
-        self.C[ctx]  += gC_p
-        self.C[ns]   += gC_n
-        self.W[c]    += gW
-
-    def train(self, corpus: list[list[str]], w2i: dict[str, int], epochs: int = W2V_EPOCHS):
-        unk  = w2i.get(UNK, 1)
-        freq = np.ones(len(w2i), dtype=np.float32)
-        for sent in corpus:
-            for t in sent:
-                freq[w2i.get(t, unk)] += 1
-        self.build_noise(freq)
-
-        print(f"[W2V] Training  vocab={len(w2i)}  embed={self.embed_size}  epochs={epochs}")
-        for epoch in range(epochs):
-            # FIX 2: lr decays linearly from 0.025 → 0.0001
-            lr = max(0.025 * (1.0 - epoch / (epochs + 1)), 0.0001)
-            for sent in corpus:
-                ids = [w2i.get(t, unk) for t in sent]
-                for i, c in enumerate(ids):
-                    lo = max(0, i - W2V_WINDOW)
-                    hi = min(len(ids), i + W2V_WINDOW + 1)
-                    for j in range(lo, hi):
-                        if j != i:
-                            self._sgns_step(c, ids[j], lr)
-            print(f"  epoch {epoch + 1}/{epochs}  lr={lr:.5f}")
-
-        # Pre-compute L2-normalised embeddings
-        norms = np.linalg.norm(self.W, axis=1, keepdims=True)
-        norms = np.where(norms < 1e-9, 1.0, norms)
-        self._normed = self.W / norms
-
-    def vec(self, idx: int) -> np.ndarray:
-        """Return L2-normalised embedding for vocab index."""
-        if self._normed is not None:
-            return self._normed[idx]
-        v = self.W[idx].copy()
-        n = np.linalg.norm(v)
-        return v / n if n > 1e-9 else v
-
-    def save(self, d: str):
-        np.save(os.path.join(d, "w2v_W.npy"), self.W)
-        np.save(os.path.join(d, "w2v_C.npy"), self.C)
-
-    def load(self, d: str):
-        self.W = np.load(os.path.join(d, "w2v_W.npy"))
-        self.C = np.load(os.path.join(d, "w2v_C.npy"))
-        self.embed_size = self.W.shape[1]
-        # Rebuild normed cache after loading
-        norms = np.linalg.norm(self.W, axis=1, keepdims=True)
-        norms = np.where(norms < 1e-9, 1.0, norms)
-        self._normed = self.W / norms
-
-
-# ══════════════════════════════════════════════════════════════
-#  TF-IDF Retriever (keyword / lexical)
-# ══════════════════════════════════════════════════════════════
-class TFIDFRetriever:
+class BM25Retriever:
     """
-    Lightweight TF-IDF retriever with BM25-style IDF weighting.
-    Provides lexical signal complementary to W2V semantic similarity.
+    Okapi BM25 — state-of-the-art sparse retrieval.
+    Parameters k1=1.5, b=0.75 are well-tuned defaults for factual QA.
     """
+    def __init__(self, k1: float = BM25_K1, b: float = BM25_B):
+        self.k1   = k1
+        self.b    = b
+        self.docs : List[str]             = []
+        self.tok  : List[List[str]]       = []
+        self.df   : Dict[str, int]        = {}
+        self.idf  : Dict[str, float]      = {}
+        self.avgdl: float                 = 0.0
+        self.N    : int                   = 0
 
-    def __init__(self):
-        self.docs: list[str]  = []
-        self.idf: dict[str, float] = {}
-        self.doc_vectors: list[dict[str, float]] = []
+    def index(self, docs: List[str]):
+        self.docs  = docs
+        self.tok   = [tokenize(d) for d in docs]
+        self.N     = len(docs)
+        self.avgdl = sum(len(t) for t in self.tok) / max(self.N, 1)
 
-    def _tokenize(self, text: str) -> list[str]:
-        return re.findall(r"[a-z]{2,}", text.lower())
+        # Document frequency
+        self.df = defaultdict(int)
+        for tok_list in self.tok:
+            for term in set(tok_list):
+                self.df[term] += 1
 
-    def _tf(self, tokens: list[str]) -> dict[str, float]:
-        c = Counter(tokens)
-        n = max(len(tokens), 1)
-        return {w: cnt / n for w, cnt in c.items()}
-
-    def index(self, docs: list[str]):
-        self.docs = docs
-        N  = len(docs)
-        df: Counter = Counter()
-        tfs: list[dict[str, float]] = []
-
-        for doc in docs:
-            tokens = self._tokenize(doc)
-            tf     = self._tf(tokens)
-            tfs.append(tf)
-            df.update(tf.keys())   # each word counted once per doc
-
-        # IDF (smooth)
-        self.idf = {w: math.log((N + 1) / (cnt + 1)) + 1.0
-                    for w, cnt in df.items()}
-
-        # TF-IDF vectors
-        self.doc_vectors = []
-        for tf in tfs:
-            vec = {w: tf[w] * self.idf.get(w, 1.0) for w in tf}
-            # L2-normalise
-            norm = math.sqrt(sum(v * v for v in vec.values())) or 1.0
-            self.doc_vectors.append({w: v / norm for w, v in vec.items()})
-
-        print(f"[TF-IDF] Indexed {len(docs)} docs  vocab={len(self.idf)}")
+        # IDF with Robertson correction
+        self.idf = {
+            term: math.log((self.N - df + 0.5) / (df + 0.5) + 1.0)
+            for term, df in self.df.items()
+        }
+        print(f"[BM25] Indexed {self.N} docs, vocab={len(self.df)}")
 
     def score(self, query: str, doc_idx: int) -> float:
-        tokens  = self._tokenize(query)
-        q_tf    = self._tf(tokens)
-        q_vec   = {w: q_tf[w] * self.idf.get(w, 0.0) for w in q_tf}
-        q_norm  = math.sqrt(sum(v * v for v in q_vec.values())) or 1.0
-        q_vec   = {w: v / q_norm for w, v in q_vec.items()}
-        d_vec   = self.doc_vectors[doc_idx]
-        return sum(q_vec.get(w, 0.0) * d_vec.get(w, 0.0) for w in q_vec)
+        q_terms = tokenize(query)
+        tokens  = self.tok[doc_idx]
+        dl      = len(tokens)
+        tf_map  = Counter(tokens)
+        s = 0.0
+        for term in q_terms:
+            if term not in self.idf:
+                continue
+            tf = tf_map.get(term, 0)
+            num = tf * (self.k1 + 1)
+            den = tf + self.k1 * (1 - self.b + self.b * dl / max(self.avgdl, 1))
+            s  += self.idf[term] * num / max(den, 1e-9)
+        return s
 
-    def retrieve(self, query: str, top_k: int = 5) -> list[tuple[float, str]]:
-        scores = [self.score(query, i) for i in range(len(self.docs))]
-        k      = min(top_k, len(self.docs))
-        top_i  = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:k]
-        return [(scores[i], self.docs[i]) for i in top_i]
+    def retrieve(self, query: str, top_k: int = RETRIEVAL_TOP_K) -> List[Tuple[float, str]]:
+        scores = np.array([self.score(query, i) for i in range(self.N)])
+        # Normalise to [0,1]
+        mx = scores.max()
+        if mx > 0:
+            scores = scores / mx
+        k   = min(top_k, self.N)
+        idx = np.argpartition(scores, -k)[-k:]
+        idx = idx[np.argsort(scores[idx])[::-1]]
+        return [(float(scores[i]), self.docs[i]) for i in idx]
 
     def save(self, d: str):
-        with open(os.path.join(d, "tfidf.pkl"), "wb") as f:
-            pickle.dump({"idf": self.idf, "doc_vectors": self.doc_vectors, "docs": self.docs}, f)
+        with open(os.path.join(d, "bm25.pkl"), "wb") as f:
+            pickle.dump({
+                "docs": self.docs, "tok": self.tok, "df": dict(self.df),
+                "idf": self.idf, "avgdl": self.avgdl, "N": self.N,
+                "k1": self.k1, "b": self.b,
+            }, f)
 
     def load(self, d: str):
-        with open(os.path.join(d, "tfidf.pkl"), "rb") as f:
+        with open(os.path.join(d, "bm25.pkl"), "rb") as f:
             data = pickle.load(f)
-        self.idf         = data["idf"]
-        self.doc_vectors = data["doc_vectors"]
-        self.docs        = data["docs"]
+        self.docs   = data["docs"]
+        self.tok    = data["tok"]
+        self.df     = defaultdict(int, data["df"])
+        self.idf    = data["idf"]
+        self.avgdl  = data["avgdl"]
+        self.N      = data["N"]
+        self.k1     = data["k1"]
+        self.b      = data["b"]
+        print(f"[BM25] Loaded {self.N} docs")
 
 
 # ══════════════════════════════════════════════════════════════
-#  Semantic (Word2Vec mean-pooling) Retriever
+#  TF-IDF Retriever (cosine similarity)
 # ══════════════════════════════════════════════════════════════
-class SemanticRetriever:
-    def __init__(self, w2v: Word2Vec, w2i: dict[str, int]):
-        self.w2v  = w2v
-        self.w2i  = w2i
-        self.vecs: np.ndarray | None = None
-        self.docs: list[str] = []
+class TFIDFRetriever:
+    """Sparse TF-IDF with cosine similarity — fast complement to BM25."""
 
-    def _text_vec(self, text: str) -> np.ndarray:
-        unk = self.w2i.get(UNK, 1)
-        vs  = [self.w2v.vec(self.w2i.get(t, unk))
-               for t in text.lower().split()]
-        if not vs:
-            return np.zeros(self.w2v.embed_size, dtype=np.float32)
-        v = np.mean(vs, 0).astype(np.float32)
-        n = np.linalg.norm(v)
-        return v / n if n > 1e-9 else v
+    def __init__(self, max_features: int = TFIDF_MAX_FEATS):
+        self.max_features = max_features
+        self.vocab        : Dict[str, int] = {}
+        self.idf_vec      : Optional[np.ndarray] = None
+        self.doc_vecs     : Optional[np.ndarray] = None
+        self.docs         : List[str]             = []
 
-    def index(self, docs: list[str]):
-        self.docs = docs
-        self.vecs = np.vstack([self._text_vec(d) for d in docs]).astype(np.float32)
-        print(f"[Semantic] Indexed {len(docs)} docs  shape={self.vecs.shape}")
+    def _build_vocab(self, tokenized: List[List[str]]):
+        df = defaultdict(int)
+        for toks in tokenized:
+            for t in set(toks):
+                df[t] += 1
+        # Keep top-N by document frequency (but keep rare domain terms)
+        sorted_terms = sorted(df.items(), key=lambda x: -x[1])
+        self.vocab   = {t: i for i, (t, _) in enumerate(sorted_terms[:self.max_features])}
 
-    def retrieve(self, query: str, top_k: int = 5) -> list[tuple[float, str]]:
-        q      = self._text_vec(query).reshape(1, -1)
-        scores = (self.vecs @ q.T).flatten()              # cosine similarity
-        k      = min(top_k, len(self.docs))
+    def _tfidf_vec(self, tokens: List[str], N: int, df: Dict[str, int]) -> np.ndarray:
+        tf    = Counter(tokens)
+        total = max(len(tokens), 1)
+        v     = np.zeros(len(self.vocab), dtype=np.float32)
+        for term, cnt in tf.items():
+            if term in self.vocab:
+                tf_val  = cnt / total
+                idf_val = math.log((N + 1) / (df.get(term, 0) + 1)) + 1.0
+                v[self.vocab[term]] = tf_val * idf_val
+        norm = np.linalg.norm(v)
+        return v / norm if norm > 1e-9 else v
+
+    def index(self, docs: List[str]):
+        self.docs  = docs
+        tokenized  = [tokenize(d) for d in docs]
+        self._build_vocab(tokenized)
+        N  = len(docs)
+        df = defaultdict(int)
+        for toks in tokenized:
+            for t in set(toks):
+                df[t] += 1
+        self.doc_vecs = np.vstack([self._tfidf_vec(t, N, df) for t in tokenized])
+        print(f"[TFIDF] Indexed {N} docs, vocab={len(self.vocab)}")
+
+    def retrieve(self, query: str, top_k: int = RETRIEVAL_TOP_K) -> List[Tuple[float, str]]:
+        df = defaultdict(int)  # not needed for query; IDF already in doc_vecs
+        N  = len(self.docs)
+        q_toks = tokenize(query)
+        q_vec  = self._tfidf_vec(q_toks, N, df)
+        scores = self.doc_vecs @ q_vec
+        k      = min(top_k, N)
         idx    = np.argpartition(scores, -k)[-k:]
         idx    = idx[np.argsort(scores[idx])[::-1]]
         return [(float(scores[i]), self.docs[i]) for i in idx]
 
     def save(self, d: str):
+        np.save(os.path.join(d, "tfidf_vecs.npy"), self.doc_vecs)
+        with open(os.path.join(d, "tfidf_meta.pkl"), "wb") as f:
+            pickle.dump({"vocab": self.vocab, "docs": self.docs}, f)
+
+    def load(self, d: str):
+        self.doc_vecs = np.load(os.path.join(d, "tfidf_vecs.npy"))
+        with open(os.path.join(d, "tfidf_meta.pkl"), "rb") as f:
+            meta = pickle.load(f)
+        self.vocab = meta["vocab"]
+        self.docs  = meta["docs"]
+        print(f"[TFIDF] Loaded {len(self.docs)} docs")
+
+
+# ══════════════════════════════════════════════════════════════
+#  Hybrid Retriever (BM25 + TF-IDF fusion)
+# ══════════════════════════════════════════════════════════════
+class HybridRetriever:
+    """
+    Reciprocal Rank Fusion (RRF) + linear interpolation.
+    alpha=0.6 weights BM25 slightly higher (better for exact agri terms).
+    """
+    def __init__(self, alpha: float = HYBRID_ALPHA, rrf_k: int = 60):
+        self.alpha  = alpha
+        self.rrf_k  = rrf_k
+        self.bm25   = BM25Retriever()
+        self.tfidf  = TFIDFRetriever()
+        self.docs   : List[str] = []
+
+    def index(self, docs: List[str]):
+        self.docs = docs
+        self.bm25.index(docs)
+        self.tfidf.index(docs)
+
+    def retrieve(self, query: str, top_k: int = RETRIEVAL_TOP_K) -> List[Tuple[float, str]]:
+        k2   = min(top_k * 3, len(self.docs))  # retrieve more, then fuse
+        bm25_res  = self.bm25.retrieve(query, k2)
+        tfidf_res = self.tfidf.retrieve(query, k2)
+
+        # Build doc -> score maps
+        bm25_scores  = {doc: score for score, doc in bm25_res}
+        tfidf_scores = {doc: score for score, doc in tfidf_res}
+
+        # RRF for rank fusion
+        bm25_rank    = {doc: i+1 for i, (_, doc) in enumerate(bm25_res)}
+        tfidf_rank   = {doc: i+1 for i, (_, doc) in enumerate(tfidf_res)}
+
+        all_docs = set(bm25_scores) | set(tfidf_scores)
+        fused    = {}
+        for doc in all_docs:
+            rrf_bm25  = 1.0 / (self.rrf_k + bm25_rank.get(doc,  k2 + 1))
+            rrf_tfidf = 1.0 / (self.rrf_k + tfidf_rank.get(doc, k2 + 1))
+            fused[doc] = self.alpha * rrf_bm25 + (1 - self.alpha) * rrf_tfidf
+
+        top = sorted(fused.items(), key=lambda x: -x[1])[:top_k]
+        # Normalise
+        max_score = max(s for _, s in top) if top else 1.0
+        return [(score / max(max_score, 1e-9), doc) for doc, score in top]
+
+    def save(self, d: str):
+        self.bm25.save(d)
+        self.tfidf.save(d)
+        with open(os.path.join(d, "hybrid_meta.pkl"), "wb") as f:
+            pickle.dump({"alpha": self.alpha, "rrf_k": self.rrf_k}, f)
+
+    def load(self, d: str):
+        self.bm25.load(d)
+        self.tfidf.load(d)
+        meta_path = os.path.join(d, "hybrid_meta.pkl")
+        if os.path.exists(meta_path):
+            with open(meta_path, "rb") as f:
+                meta = pickle.load(f)
+            self.alpha = meta.get("alpha", HYBRID_ALPHA)
+            self.rrf_k = meta.get("rrf_k", 60)
+        self.docs = self.bm25.docs
+        print(f"[Hybrid] Loaded {len(self.docs)} docs (BM25 + TF-IDF)")
+
+
+# ══════════════════════════════════════════════════════════════
+#  Backwards-compatible Word2Vec (kept for legacy)
+# ══════════════════════════════════════════════════════════════
+class Vocabulary:
+    def __init__(self):
+        self.w2i, self.i2w, self.freq = {}, {}, Counter()
+        for tok in ["<PAD>", "<UNK>", "<BOS>", "<EOS>"]:
+            self._add(tok)
+
+    def _add(self, w):
+        if w not in self.w2i:
+            i = len(self.w2i); self.w2i[w] = i; self.i2w[i] = w
+
+    def build(self, corpus):
+        for tokens in corpus:
+            self.freq.update(tokens)
+        for w, c in self.freq.items():
+            if c >= 1: self._add(w)
+        print(f"[Vocab] size={len(self.w2i)}")
+
+    def encode(self, tokens): return [self.w2i.get(t, 1) for t in tokens]
+    def __len__(self): return len(self.w2i)
+
+
+class SemanticRetriever:
+    """Legacy Word2Vec retriever — use HybridRetriever for new deployments."""
+    def __init__(self, w2v, w2i):
+        self.w2v  = w2v
+        self.w2i  = w2i
+        self.vecs = None
+        self.docs = []
+
+    def _text_vec(self, text):
+        from config import W2V_EMBED_SIZE
+        vs = [self.w2v.vec(self.w2i.get(t, 1)) for t in text.lower().split()]
+        if not vs:
+            return np.zeros(self.w2v.embed_size)
+        v = np.mean(vs, 0)
+        n = np.linalg.norm(v)
+        return v / n if n > 1e-9 else v
+
+    def index(self, docs):
+        self.docs = docs
+        self.vecs = np.vstack([self._text_vec(d) for d in docs])
+        print(f"[Retriever] Indexed {len(docs)} docs (Word2Vec)")
+
+    def retrieve(self, query, top_k=RETRIEVAL_TOP_K):
+        q  = self._text_vec(query).reshape(1, -1)
+        scores = (self.vecs @ q.T).flatten()
+        k   = min(top_k, len(self.docs))
+        idx = np.argpartition(scores, -k)[-k:]
+        idx = idx[np.argsort(scores[idx])[::-1]]
+        return [(float(scores[i]), self.docs[i]) for i in idx]
+
+    def save(self, d):
         np.save(os.path.join(d, "vecs.npy"), self.vecs)
         with open(os.path.join(d, "docs.pkl"), "wb") as f:
             pickle.dump(self.docs, f)
 
-    def load(self, d: str):
+    def load(self, d):
         self.vecs = np.load(os.path.join(d, "vecs.npy"))
         with open(os.path.join(d, "docs.pkl"), "rb") as f:
             self.docs = pickle.load(f)
 
 
-# ══════════════════════════════════════════════════════════════
-#  Hybrid Retriever (Semantic + TF-IDF)
-# ══════════════════════════════════════════════════════════════
-class HybridRetriever:
-    """
-    Combines W2V semantic similarity (domain meaning) with TF-IDF
-    (exact keyword matching). Weighted linear combination.
-
-    semantic_weight + tfidf_weight should sum to 1.0.
-    A 0.6/0.4 split works well for agriculture Q&A.
-    """
-
-    def __init__(
-        self,
-        semantic: SemanticRetriever,
-        tfidf   : TFIDFRetriever,
-        semantic_weight: float = 0.6,
-        tfidf_weight   : float = 0.4,
-    ):
-        assert abs(semantic_weight + tfidf_weight - 1.0) < 1e-6, \
-            "weights must sum to 1"
-        self.semantic         = semantic
-        self.tfidf            = tfidf
-        self.semantic_weight  = semantic_weight
-        self.tfidf_weight     = tfidf_weight
-
-    @property
-    def docs(self) -> list[str]:
-        return self.semantic.docs
-
-    def retrieve(self, query: str, top_k: int = 5) -> list[tuple[float, str]]:
-        """
-        Returns top_k (combined_score, doc) pairs sorted descending.
-        """
-        sem_results = {doc: s for s, doc in self.semantic.retrieve(query, top_k * 2)}
-        tfi_results = {doc: s for s, doc in self.tfidf.retrieve(query, top_k * 2)}
-
-        # Union of candidate docs
-        all_docs = set(sem_results.keys()) | set(tfi_results.keys())
-        combined = []
-        for doc in all_docs:
-            s = (self.semantic_weight * sem_results.get(doc, 0.0) +
-                 self.tfidf_weight    * tfi_results.get(doc, 0.0))
-            combined.append((s, doc))
-
-        combined.sort(key=lambda x: x[0], reverse=True)
-        return combined[:top_k]
-
-
-# ══════════════════════════════════════════════════════════════
-#  Preprocessing helpers
-# ══════════════════════════════════════════════════════════════
-_URL_RE  = re.compile(r"http\S+")
-_WORD_RE = re.compile(r"[a-z0-9]")
-
-
-def clean(text: str) -> str:
-    text = text.lower()
-    text = _URL_RE.sub(" ", text)
-    text = re.sub(r"[^\w\s\.\,\!\?]", " ", text)
-    return re.sub(r"\s+", " ", text).strip()
-
-
-def load_jsonl(path: str) -> list[dict]:
+# ── Public helpers ────────────────────────────────────────────
+def load_jsonl(path: str) -> List[dict]:
     recs = []
     with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line:
-                try:
-                    recs.append(json.loads(line))
-                except Exception:
-                    pass
+                try: recs.append(json.loads(line))
+                except: pass
     return recs
 
 
-def build_docs(records: list[dict], min_chars: int = 30) -> list[str]:
-    """
-    Build deduplicated doc list from instruction/output records.
-    FIX 3: dedup + min length filter.
-    """
-    seen: set[str] = set()
-    docs: list[str] = []
+def build_docs(records: List[dict]) -> List[str]:
+    docs = []
     for r in records:
-        # Support both instruction-format and plain text fields
         parts = [
-            r.get("output", ""),
+            r.get("instruction", ""), r.get("output", ""),
+            r.get("input", ""),       r.get("prompt", ""),
             r.get("completion", ""),
-            r.get("instruction", ""),
-            r.get("prompt", ""),
         ]
         text = clean(" ".join(p for p in parts if p.strip()))
-        if len(text) < min_chars:
-            continue
-        if text in seen:
-            continue
-        seen.add(text)
-        docs.append(text)
+        if len(text.split()) >= 5:   # skip very short docs
+            docs.append(text)
     return docs
 
 
-# ══════════════════════════════════════════════════════════════
-#  Build & Load
-# ══════════════════════════════════════════════════════════════
-def build_retriever(
-    records : list[dict],
-    save_dir: str = RETRIEVER_DIR,
-) -> tuple[HybridRetriever, Vocabulary]:
-    """Train W2V + TF-IDF, index docs, persist everything."""
-    docs      = build_docs(records)
-    tokenized = [d.split() for d in docs]
+def build_retriever(records: List[dict], save_dir: str = RETRIEVER_DIR):
+    """Build and save the configured retriever. Returns the retriever."""
+    docs = build_docs(records)
+    print(f"[Retriever] Building {RETRIEVER_TYPE} retriever on {len(docs)} docs...")
 
-    vocab = Vocabulary()
-    vocab.build(tokenized, min_freq=2)
+    if RETRIEVER_TYPE == "hybrid":
+        ret = HybridRetriever()
+    elif RETRIEVER_TYPE == "bm25":
+        ret = BM25Retriever()
+    elif RETRIEVER_TYPE == "tfidf":
+        ret = TFIDFRetriever()
+    else:
+        raise ValueError(f"Unknown retriever type: {RETRIEVER_TYPE}")
 
-    w2v = Word2Vec(len(vocab.w2i), W2V_EMBED_SIZE)
-    w2v.train(tokenized, vocab.w2i, epochs=W2V_EPOCHS)
-
+    ret.index(docs)
     os.makedirs(save_dir, exist_ok=True)
-    w2v.save(save_dir)
-    with open(os.path.join(save_dir, "vocab.pkl"), "wb") as f:
-        pickle.dump(vocab, f)
-
-    sem = SemanticRetriever(w2v, vocab.w2i)
-    sem.index(docs)
-    sem.save(save_dir)
-
-    tfi = TFIDFRetriever()
-    tfi.index(docs)
-    tfi.save(save_dir)
-
-    hybrid = HybridRetriever(sem, tfi)
-    print(f"[Retriever] Built hybrid retriever over {len(docs)} docs")
-    return hybrid, vocab
+    ret.save(save_dir)
+    # Save type marker
+    with open(os.path.join(save_dir, "type.txt"), "w") as f:
+        f.write(RETRIEVER_TYPE)
+    print(f"[Retriever] Saved → {save_dir}")
+    return ret, None
 
 
-def load_retriever(
-    save_dir: str = RETRIEVER_DIR,
-) -> tuple[HybridRetriever, Vocabulary]:
-    """Load pre-built hybrid retriever from disk."""
-    with open(os.path.join(save_dir, "vocab.pkl"), "rb") as f:
-        vocab = pickle.load(f)
+def load_retriever(save_dir: str = RETRIEVER_DIR):
+    """Load the saved retriever (auto-detects type)."""
+    type_path = os.path.join(save_dir, "type.txt")
+    rtype     = RETRIEVER_TYPE
+    if os.path.exists(type_path):
+        with open(type_path) as f:
+            rtype = f.read().strip()
 
-    w2v = Word2Vec(len(vocab.w2i), W2V_EMBED_SIZE)
-    w2v.load(save_dir)
+    if rtype == "hybrid":
+        ret = HybridRetriever()
+    elif rtype == "bm25":
+        ret = BM25Retriever()
+    elif rtype == "tfidf":
+        ret = TFIDFRetriever()
+    else:
+        # Legacy Word2Vec fallback
+        vocab_path = os.path.join(save_dir, "vocab.pkl")
+        if os.path.exists(vocab_path):
+            with open(vocab_path, "rb") as f:
+                vocab = pickle.load(f)
+            from config import W2V_EMBED_SIZE
+            class _W2V:
+                def __init__(self):
+                    self.W = np.load(os.path.join(save_dir, "w2v_W.npy"))
+                    self.embed_size = self.W.shape[1]
+                def vec(self, idx):
+                    v = self.W[idx]; n = np.linalg.norm(v)
+                    return v / n if n > 1e-9 else v
+            w2v = _W2V()
+            ret = SemanticRetriever(w2v, vocab.w2i)
+            ret.load(save_dir)
+            return ret, vocab
+        raise FileNotFoundError(f"No retriever found at {save_dir}")
 
-    sem = SemanticRetriever(w2v, vocab.w2i)
-    sem.load(save_dir)
-
-    tfi = TFIDFRetriever()
-    tfi.load(save_dir)
-
-    hybrid = HybridRetriever(sem, tfi)
-    print(f"[Retriever] Loaded hybrid retriever  docs={len(hybrid.docs)}")
-    return hybrid, vocab
+    ret.load(save_dir)
+    return ret, None

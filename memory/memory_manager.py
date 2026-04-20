@@ -1,77 +1,138 @@
 """
 memory/memory_manager.py
 ========================
-Short-term conversation memory (last 5 turns) +
-Long-term farmer profile (crop, location, soil, farm size).
+Enhanced Memory Manager v2.1
 
-FIXES:
-  FIX 1: crop_type extraction uses word-boundary check (\b) instead of substring
-          matching. Original bug: "rice" in "licorice" would incorrectly match.
-  FIX 2: FarmerProfile.save() wrapped in try/except to handle disk-full gracefully
-  FIX 3: location extractor patterns tightened to avoid matching "I", "My", "The"
-          as location names (require at least 3 chars and not a stopword)
+Improvements over v2:
+  + Richer extraction — 50+ crop names, state names, soil types
+  + Number normalisation (acres, bighas, hectares all unified)
+  + Context injection into RAG (memory is now a RAG signal)
+  + Profile confidence tracking (how certain we are)
+  + Session context window for multi-turn reasoning
 """
 
-import re
-import json
-import os
-import sys
+import re, json, os, sys
 from datetime import datetime
 from collections import deque
+from typing import Optional, Dict, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import FARMER_PROFILE, MEMORY_DIR
 
+# ── Comprehensive crop list ───────────────────────────────────
 KNOWN_CROPS = {
-    "rice", "wheat", "corn", "maize", "potato", "tomato", "onion", "garlic",
-    "pepper", "chili", "eggplant", "cucumber", "mustard", "cauliflower",
-    "cabbage", "broccoli", "bitter gourd", "loofah", "watermelon", "banana",
-    "mango", "lemon", "coconut", "betel nut", "tea", "coffee", "sugarcane",
-    "cotton", "soybean", "cowpea", "black bean", "ginger", "turmeric", "okra",
-    "pumpkin", "gourd", "radish", "brinjal", "spinach", "pea", "bean",
-    "groundnut", "sunflower", "jute",
+    # Cereals
+    "rice","paddy","wheat","maize","corn","sorghum","jowar","bajra","millet",
+    "barley","oats","ragi","finger millet",
+    # Pulses
+    "chickpea","gram","lentil","cowpea","moong","urad","arhar","pigeon pea",
+    "blackgram","greengram","rajma","soybean","soya",
+    # Oilseeds
+    "mustard","rapeseed","sunflower","groundnut","peanut","sesame","linseed",
+    "castor","safflower","nigerseed",
+    # Vegetables
+    "potato","tomato","onion","garlic","chilli","pepper","brinjal","eggplant",
+    "cauliflower","cabbage","okra","bhindi","cucumber","pumpkin","gourd",
+    "radish","carrot","spinach","pea","bean","french bean","bitter gourd",
+    "bottle gourd","ridge gourd","capsicum","chili",
+    # Fruits
+    "mango","banana","lemon","orange","papaya","guava","coconut","watermelon",
+    "muskmelon","grapes","apple","pomegranate","litchi","jackfruit","pineapple",
+    # Cash crops
+    "cotton","sugarcane","jute","tea","coffee","tobacco","rubber",
+    "arecanut","cashew","cardamom","turmeric","ginger","tapioca","cassava",
+    # Other
+    "moringa","bamboo","teak","eucalyptus","sandalwood","poplar",
 }
 
-# Common English stopwords that should not be captured as location names
-_STOPWORDS = {
-    "i", "my", "the", "a", "an", "is", "are", "was", "we", "our",
-    "this", "that", "it", "he", "she", "they", "you", "in", "at",
-    "on", "by", "for", "of", "to", "from",
+# ── Indian states / UTs ───────────────────────────────────────
+KNOWN_STATES = {
+    "assam","kerala","karnataka","tamil nadu","andhra pradesh","telangana",
+    "maharashtra","gujarat","rajasthan","madhya pradesh","uttar pradesh",
+    "bihar","west bengal","odisha","jharkhand","chhattisgarh","punjab",
+    "haryana","himachal pradesh","uttarakhand","delhi","goa","manipur",
+    "meghalaya","mizoram","nagaland","tripura","arunachal pradesh","sikkim",
+    "jammu and kashmir","ladakh","chandigarh","puducherry",
 }
+
+# ── Soil type keywords ────────────────────────────────────────
+SOIL_TYPES = {
+    "sandy", "clay", "loamy", "loam", "red", "black", "alluvial",
+    "laterite", "silty", "peaty", "chalky", "saline", "alkaline",
+}
+
+
+# ── Extractor patterns ────────────────────────────────────────
+def _build_crop_pattern() -> re.Pattern:
+    escaped = sorted([re.escape(c) for c in KNOWN_CROPS], key=len, reverse=True)
+    return re.compile(r"\b(" + "|".join(escaped) + r")\b", re.I)
+
+def _build_state_pattern() -> re.Pattern:
+    escaped = sorted([re.escape(s) for s in KNOWN_STATES], key=len, reverse=True)
+    return re.compile(r"\b(" + "|".join(escaped) + r")\b", re.I)
+
+_CROP_RE  = _build_crop_pattern()
+_STATE_RE = _build_state_pattern()
 
 _EXTRACTORS = {
     "crop_type": [
-        r"\b(?:growing|farming|planting|cultivating)\s+([a-z]+(?:\s+[a-z]+)?)\b",
-        r"\bmy\s+([a-z]+(?:\s+[a-z]+)?)\s+(?:crop|field|farm)\b",
-        r"\b(rice|wheat|maize|corn|potato|tomato|onion|garlic|pepper|chili|"
-        r"eggplant|mustard|cauliflower|cabbage|banana|mango|lemon|coconut|"
-        r"sugarcane|cotton|soybean|groundnut|sunflower|ginger|turmeric|okra|"
-        r"pumpkin|radish|brinjal|spinach|pea|bean|cucumber|jute)\b",
+        _CROP_RE,
+        re.compile(r"\b(?:growing|farming|planting|cultivating|sowing)\s+([\w\s]+?)(?:\s+crop|\s+in|\s+near|$)", re.I),
+        re.compile(r"\bmy\s+([\w\s]+?)\s+(?:crop|field|farm|plants?)\b", re.I),
     ],
     "location": [
-        # FIX 3: Require at least 3 chars and not a stopword
-        r"\b(?:in|near|at|from)\s+([A-Z][a-zA-Z]{2,}(?:\s+[A-Z][a-zA-Z]{2,})?)\b",
-        r"\b([A-Z][a-zA-Z]{2,})\s+(?:district|region|village|area|block|taluk)\b",
+        _STATE_RE,
+        re.compile(r"\b(?:in|near|at|from|district\s+of)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b"),
+        re.compile(r"\b([A-Z][a-z]+)\s+(?:district|village|taluk|block|mandal|tehsil)\b"),
     ],
     "soil_type": [
-        r"\b(sandy|clay|loamy|loam|red|black|alluvial|laterite)\s+soil\b",
-        r"\bsoil\s+(?:type\s+is|is)\s+(sandy|clay|loamy|red|black|alluvial)\b",
+        re.compile(
+            r"\b(" + "|".join(SOIL_TYPES) + r")\s+(?:soil|land|earth)\b", re.I),
+        re.compile(r"\bsoil\s+(?:type\s+is|is)\s+(" + "|".join(SOIL_TYPES) + r")\b", re.I),
     ],
     "farm_size": [
-        r"(\d+(?:\.\d+)?)\s*(?:acre|bigha|hectare|ha|katha)s?\b",
+        re.compile(r"(\d+(?:\.\d+)?)\s*(?:acre|bigha|hectare|ha|katha|gunta)s?\b", re.I),
     ],
     "name": [
-        r"\b(?:my name is|i am|call me)\s+([A-Z][a-z]+)\b",
+        re.compile(r"\b(?:my name is|i am|i'm|call me|this is)\s+([A-Z][a-z]+)\b"),
+        re.compile(r"\bname\s*[:—]\s*([A-Z][a-z]+)\b"),
     ],
 }
 
+# Unit conversion to acres (for uniform storage)
+_UNIT_TO_ACRES = {
+    "acre": 1.0, "acres": 1.0,
+    "hectare": 2.471, "hectares": 2.471, "ha": 2.471,
+    "bigha": 0.619,  # varies by state — using UP bigha as default
+    "katha": 0.033,
+    "gunta": 0.025,
+}
 
+
+def _normalise_farm_size(text: str) -> Optional[str]:
+    """Extract and normalise farm size to acres."""
+    m = re.search(
+        r"(\d+(?:\.\d+)?)\s*(acre|bigha|hectare|ha|katha|gunta)s?", text, re.I)
+    if not m:
+        return None
+    amount = float(m.group(1))
+    unit   = m.group(2).lower().rstrip("s")
+    acres  = amount * _UNIT_TO_ACRES.get(unit, 1.0)
+    if acres < 0.1 or acres > 10000:   # sanity check
+        return None
+    return f"{amount} {unit}s ({acres:.1f} acres)"
+
+
+# ══════════════════════════════════════════════════════════════
+#  Farmer Profile
+# ══════════════════════════════════════════════════════════════
 class FarmerProfile:
     def __init__(self, path: str = FARMER_PROFILE):
-        self.path = path
-        self.data = {
-            k: None for k in
-            ["name", "crop_type", "location", "soil_type", "farm_size", "updated"]
+        self.path       = path
+        self.data: Dict = {
+            "name": None, "crop_type": None, "location": None,
+            "soil_type": None, "farm_size": None, "updated": None,
+            "confidence": {},   # field -> score
         }
         os.makedirs(MEMORY_DIR, exist_ok=True)
         self._load()
@@ -85,79 +146,112 @@ class FarmerProfile:
                 pass
 
     def save(self):
-        """FIX 2: Wrapped in try/except to handle disk-full or permission errors."""
-        try:
-            with open(self.path, "w") as f:
-                json.dump(self.data, f, indent=2)
-        except OSError as e:
-            print(f"[Memory] WARNING: Could not save profile: {e}")
+        with open(self.path, "w") as f:
+            json.dump(self.data, f, indent=2)
 
-    def update_from_text(self, text: str) -> dict:
+    def update_from_text(self, text: str) -> Dict[str, str]:
         found = {}
-        for field, patterns in _EXTRACTORS.items():
-            for pat in patterns:
-                m = re.search(pat, text, re.IGNORECASE)
-                if m:
-                    val = m.group(1).strip().lower()
 
-                    # FIX 1: For crop_type, use WORD BOUNDARY check in KNOWN_CROPS
-                    # Original bug: "rice" in "licorice" == True (substring match)
-                    # Fixed: check if the exact word val appears in KNOWN_CROPS
-                    if field == "crop_type":
-                        # Check the extracted value is a known crop (exact match)
-                        matched_crop = None
-                        for crop in KNOWN_CROPS:
-                            if re.search(r'\b' + re.escape(crop) + r'\b', val):
-                                matched_crop = crop
-                                break
-                        if not matched_crop:
-                            continue
-                        val = matched_crop
+        # Crop — use comprehensive crop list
+        m = _CROP_RE.search(text)
+        if m:
+            crop = m.group(1).lower()
+            self.data["crop_type"] = crop
+            self.data["confidence"]["crop_type"] = 0.95
+            found["crop_type"] = crop
 
-                    # FIX 3: For location, reject stopwords and very short strings
-                    if field == "location":
-                        if val.lower() in _STOPWORDS or len(val) < 3:
-                            continue
+        # Location — try state first, then city pattern
+        for pat in _EXTRACTORS["location"]:
+            m = pat.search(text)
+            if m:
+                val = m.group(1).strip().lower()
+                if len(val) > 2:
+                    self.data["location"] = val
+                    self.data["confidence"]["location"] = 0.85
+                    found["location"] = val
+                    break
 
-                    if val and len(val) > 1:
-                        self.data[field] = val
-                        found[field]     = val
-                        break
+        # Soil type
+        for pat in _EXTRACTORS["soil_type"]:
+            m = pat.search(text)
+            if m:
+                soil = m.group(1).lower()
+                self.data["soil_type"] = soil + " soil"
+                self.data["confidence"]["soil_type"] = 0.9
+                found["soil_type"] = soil
+                break
+
+        # Farm size with unit normalisation
+        size = _normalise_farm_size(text)
+        if size:
+            self.data["farm_size"] = size
+            self.data["confidence"]["farm_size"] = 0.9
+            found["farm_size"] = size
+
+        # Name
+        for pat in _EXTRACTORS["name"]:
+            m = pat.search(text)
+            if m:
+                name = m.group(1).strip()
+                if 2 <= len(name) <= 30:
+                    self.data["name"] = name
+                    self.data["confidence"]["name"] = 0.9
+                    found["name"] = name
+                    break
 
         if found:
             self.data["updated"] = datetime.now().isoformat()
             self.save()
+
         return found
 
     def as_text(self) -> str:
-        lines = []
-        if self.data.get("name"):       lines.append(f"Farmer: {self.data['name']}")
-        if self.data.get("crop_type"):  lines.append(f"Crop: {self.data['crop_type']}")
-        if self.data.get("location"):   lines.append(f"Location: {self.data['location']}")
-        if self.data.get("soil_type"):  lines.append(f"Soil: {self.data['soil_type']}")
-        if self.data.get("farm_size"):  lines.append(f"Farm: {self.data['farm_size']}")
-        return "; ".join(lines) if lines else "No profile yet."
+        parts = []
+        if self.data.get("name"):
+            parts.append(f"Farmer: {self.data['name']}")
+        if self.data.get("crop_type"):
+            parts.append(f"Crop: {self.data['crop_type']}")
+        if self.data.get("location"):
+            parts.append(f"Location: {self.data['location']}")
+        if self.data.get("soil_type"):
+            parts.append(f"Soil: {self.data['soil_type']}")
+        if self.data.get("farm_size"):
+            parts.append(f"Farm: {self.data['farm_size']}")
+        return "; ".join(parts) if parts else "No profile yet."
 
-    def get(self, k, d=None):
+    def as_rag_context(self) -> str:
+        """Compact string for injecting into RAG prompt."""
+        parts = []
+        if self.data.get("crop_type"):
+            parts.append(f"crop={self.data['crop_type']}")
+        if self.data.get("location"):
+            parts.append(f"location={self.data['location']}")
+        if self.data.get("soil_type"):
+            parts.append(f"soil={self.data['soil_type']}")
+        return ", ".join(parts) if parts else ""
+
+    def get(self, k: str, d=None):
         return self.data.get(k, d)
 
 
+# ══════════════════════════════════════════════════════════════
+#  Conversation Memory
+# ══════════════════════════════════════════════════════════════
 class ConversationMemory:
     def __init__(self, max_turns: int = 5):
         self.turns = deque(maxlen=max_turns * 2)
 
     def add(self, role: str, text: str):
         self.turns.append({
-            "role": role,
-            "text": text,
+            "role": role, "text": text,
             "time": datetime.now().strftime("%H:%M"),
         })
 
     def as_text(self) -> str:
         if not self.turns:
-            return "No history."
+            return ""
         return "\n".join(
-            f"[{t['time']}] {'User' if t['role'] == 'user' else 'Bot'}: {t['text']}"
+            f"{'User' if t['role'] == 'user' else 'Bot'}: {t['text']}"
             for t in self.turns
         )
 
@@ -167,10 +261,18 @@ class ConversationMemory:
                 return t["text"]
         return ""
 
+    def recent_topics(self) -> str:
+        """Extract a short topic summary from recent turns."""
+        texts = [t["text"] for t in list(self.turns)[-6:] if t["role"] == "user"]
+        return " | ".join(texts[-3:]) if texts else ""
+
     def clear(self):
         self.turns.clear()
 
 
+# ══════════════════════════════════════════════════════════════
+#  Memory Manager
+# ══════════════════════════════════════════════════════════════
 class MemoryManager:
     def __init__(self, max_turns: int = 5):
         self.short = ConversationMemory(max_turns)
@@ -186,13 +288,19 @@ class MemoryManager:
         self.short.add("bot", text)
 
     def context_text(self) -> str:
-        return (f"[Farmer Profile]\n{self.long.as_text()}\n\n"
-                f"[Recent Conversation]\n{self.short.as_text()}")
+        parts = []
+        profile = self.long.as_text()
+        if profile and profile != "No profile yet.":
+            parts.append(f"[Farmer Profile]\n{profile}")
+        history = self.short.as_text()
+        if history:
+            parts.append(f"[Recent turns]\n{history}")
+        return "\n\n".join(parts)
 
-    def get_crop(self):
+    def get_crop(self) -> Optional[str]:
         return self.long.get("crop_type")
 
-    def get_location(self):
+    def get_location(self) -> Optional[str]:
         return self.long.get("location")
 
     def reset_session(self):
