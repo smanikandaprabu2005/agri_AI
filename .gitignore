@@ -16,6 +16,10 @@ saved_models/
 *.txt
 *.zip
 
+node_modules/
+dist/
+build/
+
 # python cache
 __pycache__/
 *.pyc
