@@ -3,7 +3,7 @@ data_pipeline/data/
 data_pipeline/data collection/
 data_pipeline/processed/
 data_pipeline/tokens/
-
+books/
 # models
 saved_models/
 *.pt
