@@ -25,10 +25,10 @@ from models.tokenizer import build_training_prompt, RESPONSE_MARKER
 
 # ── Config — use CLI flags if your folder has a space ──────────
 TOKENIZER_MODEL = "sage_tokenizer.model"
-TRAIN_DATASET   = "data collection/train_data/train_dataset.jsonl"
-VAL_DATASET     = "data collection/val_data/val_dataset.jsonl"
-TRAIN_TOKENS    = "tokens/train_tokens.jsonl"
-VAL_TOKENS      = "tokens/val_tokens.jsonl"
+TRAIN_DATASET   = "data_pipeline/data collection/train_dataset.jsonl"
+VAL_DATASET     = "data_pipeline/data collection/val_dataset.jsonl"
+TRAIN_TOKENS    = "data_pipeline/tokens/train_tokens.jsonl"
+VAL_TOKENS      = "data_pipeline/tokens/val_tokens.jsonl"
 
 _SP = None
 

@@ -35,8 +35,8 @@ except ImportError:
 
 # ── Config ────────────────────────────────────────────────────
 TOKENIZER_MODEL = "sage_tokenizer.model"
-CORPUS_FILE     = "processed/knowledge_corpus.txt"
-OUTPUT_FILE     = "tokens/pretrain_tokens.jsonl"
+CORPUS_FILE     = "data_pipeline/processed/knowledge_corpus.txt"
+OUTPUT_FILE     = "data_pipeline/tokens/pretrain_tokens.jsonl"
 MIN_TEXT_LEN    = 30    # skip very short sentences
 
 

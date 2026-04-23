@@ -46,7 +46,7 @@ from retrieval.vector_db import VectorDB, clean_text, chunk_text
 # ── Config ────────────────────────────────────────────────────
 BOOKS_DIR        = "data/books"
 VECTOR_DB_DIR    = "saved_models/vector_index"
-PRETRAIN_BOOKS   = "processed/books_pretrain.txt"
+PRETRAIN_BOOKS   = "data_pipeline/processed/books_pretrain.txt"
 CHUNK_SIZE       = 256    # words per chunk for RAG
 OVERLAP          = 32     # overlap between chunks
 PRETRAIN_CHUNK   = 512    # larger chunks for pretraining

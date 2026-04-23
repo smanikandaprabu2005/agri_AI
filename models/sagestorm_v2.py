@@ -1,18 +1,14 @@
 """
 models/sagestorm_v2.py
 ======================
-SageStorm V2.1 — Enhanced Model Architecture
+SageStorm V2.2 — Regularization-Enhanced Architecture
 
-New vs V2:
-  + Gradient checkpointing (saves ~40% VRAM)
-  + Improved RoPE with longer base period (better extrapolation)
-  + Pre-norm + post-norm hybrid for stability
-  + Better weight initialisation (depth-scaled sigma)
-  + Flash attention via F.scaled_dot_product_attention (already in V2, kept)
-  + Larger context window (768) and embed dim (640)
-  + 14 layers instead of 12
-  + Improved generation with min_tokens and better repetition penalty
-  + param_count separates tied vs total
+Key changes vs V2.1:
+  + Stochastic depth (drop-path) per block — strongest regularizer for small data
+  + Linearly increasing drop-path rate (deeper = higher rate)
+  + Reduced default size (40M) to match 13M token pretrain budget
+  + LayerScale initialization for more stable deep training
+  + Kept all V2.1 improvements (RoPE, GQA, SwiGLU, Flash Attn)
 """
 
 import math, os
@@ -32,9 +28,12 @@ from config import (
     USE_GRADIENT_CHECKPOINTING,
 )
 
+# Max stochastic depth rate — increases linearly across layers
+DROP_PATH_MAX = 0.10   # 10% at the deepest layer
+
 
 def _ffn_hidden(embed_dim: int, mult: float = FFN_MULT) -> int:
-    """SwiGLU hidden dim rounded to nearest 64 for hardware efficiency."""
+    """SwiGLU hidden dim rounded to nearest 64."""
     raw = int(embed_dim * mult)
     return ((raw + 63) // 64) * 64
 
@@ -54,11 +53,11 @@ class RMSNorm(nn.Module):
 
 
 # ══════════════════════════════════════════════════════════════
-#  Rotary Position Embedding (RoPE)
-#  Uses base=500000 (LLaMA-3 style) for better long-context
+#  Rotary Position Embedding (RoPE) — LLaMA-3 style
 # ══════════════════════════════════════════════════════════════
 class RotaryEmbedding(nn.Module):
-    def __init__(self, head_dim: int, max_seq: int = CONTEXT_LENGTH, base: float = 500_000.0):
+    def __init__(self, head_dim: int, max_seq: int = CONTEXT_LENGTH,
+                 base: float = 500_000.0):
         super().__init__()
         inv_freq = 1.0 / (base ** (torch.arange(0, head_dim, 2).float() / head_dim))
         self.register_buffer("inv_freq", inv_freq)
@@ -106,19 +105,20 @@ class SwiGLU(nn.Module):
 #  Grouped Query Attention (GQA)
 # ══════════════════════════════════════════════════════════════
 class GQA(nn.Module):
-    def __init__(self, dim: int, n_heads: int, kv_heads: int, dropout: float = DROPOUT):
+    def __init__(self, dim: int, n_heads: int, kv_heads: int,
+                 dropout: float = DROPOUT):
         super().__init__()
         assert dim % n_heads == 0 and n_heads % kv_heads == 0
         self.n_heads  = n_heads
         self.kv_heads = kv_heads
         self.hd       = dim // n_heads
         self.groups   = n_heads // kv_heads
-        self.q   = nn.Linear(dim, n_heads  * self.hd, bias=False)
-        self.k   = nn.Linear(dim, kv_heads * self.hd, bias=False)
-        self.v   = nn.Linear(dim, kv_heads * self.hd, bias=False)
-        self.o   = nn.Linear(dim, dim, bias=False)
-        self.dp  = nn.Dropout(dropout)
-        self.rope = RotaryEmbedding(self.hd)
+        self.q        = nn.Linear(dim, n_heads  * self.hd, bias=False)
+        self.k        = nn.Linear(dim, kv_heads * self.hd, bias=False)
+        self.v        = nn.Linear(dim, kv_heads * self.hd, bias=False)
+        self.o        = nn.Linear(dim, dim, bias=False)
+        self.dp       = nn.Dropout(dropout)
+        self.rope     = RotaryEmbedding(self.hd)
 
     def forward(self, x, mask=None):
         B, T, C = x.shape
@@ -140,59 +140,97 @@ class GQA(nn.Module):
 
 
 # ══════════════════════════════════════════════════════════════
-#  Transformer Block (Pre-LN)
+#  Transformer Block with Stochastic Depth (Drop-Path)
+#
+#  Drop-path randomly skips entire residual branches during training.
+#  This is stronger than dropout for small-data regimes because it
+#  forces different subsets of layers to learn independently.
+#  Reference: "Deep Networks with Stochastic Depth" (Huang et al., 2016)
 # ══════════════════════════════════════════════════════════════
 class Block(nn.Module):
-    def __init__(self, dim: int, n_heads: int, kv_heads: int):
+    def __init__(self, dim: int, n_heads: int, kv_heads: int,
+                 drop_path_rate: float = 0.0):
         super().__init__()
-        self.n1   = RMSNorm(dim)
-        self.attn = GQA(dim, n_heads, kv_heads)
-        self.n2   = RMSNorm(dim)
-        self.ff   = SwiGLU(dim)
+        self.n1           = RMSNorm(dim)
+        self.attn         = GQA(dim, n_heads, kv_heads)
+        self.n2           = RMSNorm(dim)
+        self.ff           = SwiGLU(dim)
+        self.drop_path_p  = drop_path_rate
+
+        # LayerScale: learn to scale residual branch magnitude
+        # Initialized near zero so early training is stable
+        # Reference: "Going deeper with Image Transformers" (Touvron et al., 2021)
+        init_val = 1e-4
+        self.ls1 = nn.Parameter(torch.ones(dim) * init_val)
+        self.ls2 = nn.Parameter(torch.ones(dim) * init_val)
+
+    def _drop_path(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Stochastic depth: during training, randomly drop entire residual
+        branch with probability drop_path_p. At inference, scale by
+        survival probability (implicit via the division by keep_prob).
+        """
+        if not self.training or self.drop_path_p <= 0.0:
+            return x
+        keep_prob = 1.0 - self.drop_path_p
+        # (B, 1, 1) mask broadcasts over sequence and channel dims
+        mask = (torch.rand(x.shape[0], 1, 1, device=x.device) < keep_prob)
+        return x * mask.float() / keep_prob
 
     def forward(self, x, mask=None):
-        x = x + self.attn(self.n1(x), mask)
-        x = x + self.ff(self.n2(x))
+        # Pre-norm + LayerScale + drop-path on each branch
+        x = x + self._drop_path(self.ls1 * self.attn(self.n1(x), mask))
+        x = x + self._drop_path(self.ls2 * self.ff(self.n2(x)))
         return x
 
     def forward_with_ckpt(self, x, mask=None):
         """Gradient-checkpointed forward for VRAM savings."""
         def attn_fn(x_in):
-            return self.attn(self.n1(x_in), mask)
-        x = x + grad_ckpt(attn_fn, x, use_reentrant=False)
-        x = x + self.ff(self.n2(x))
+            return self.ls1 * self.attn(self.n1(x_in), mask)
+        x = x + self._drop_path(grad_ckpt(attn_fn, x, use_reentrant=False))
+        x = x + self._drop_path(self.ls2 * self.ff(self.n2(x)))
         return x
 
 
 # ══════════════════════════════════════════════════════════════
-#  SageStorm V2.1 — Full Model
+#  SageStorm V2.2 — Full Model
 # ══════════════════════════════════════════════════════════════
 class SageStormV2(nn.Module):
     def __init__(
         self,
-        vocab_size     : int   = VOCAB_SIZE,
-        context_length : int   = CONTEXT_LENGTH,
-        embed_dim      : int   = EMBED_DIM,
-        num_heads      : int   = NUM_HEADS,
-        kv_heads       : int   = KV_HEADS,
-        num_layers     : int   = NUM_LAYERS,
-        dropout        : float = DROPOUT,
-        use_grad_ckpt  : bool  = USE_GRADIENT_CHECKPOINTING,
+        vocab_size      : int   = VOCAB_SIZE,
+        context_length  : int   = CONTEXT_LENGTH,
+        embed_dim       : int   = EMBED_DIM,
+        num_heads       : int   = NUM_HEADS,
+        kv_heads        : int   = KV_HEADS,
+        num_layers      : int   = NUM_LAYERS,
+        dropout         : float = DROPOUT,
+        use_grad_ckpt   : bool  = USE_GRADIENT_CHECKPOINTING,
+        drop_path_max   : float = DROP_PATH_MAX,
     ):
         super().__init__()
         self.vocab_size     = vocab_size
         self.context_length = context_length
         self.use_grad_ckpt  = use_grad_ckpt
 
-        self.emb    = nn.Embedding(vocab_size, embed_dim)
-        self.drop   = nn.Dropout(dropout)
-        self.blocks = nn.ModuleList(
-            [Block(embed_dim, num_heads, kv_heads) for _ in range(num_layers)]
-        )
-        self.norm   = RMSNorm(embed_dim)
-        self.head   = nn.Linear(embed_dim, vocab_size, bias=False)
+        self.emb  = nn.Embedding(vocab_size, embed_dim)
+        self.drop = nn.Dropout(dropout)
 
-        # Weight tying — saves ~10M params at embed_dim=640
+        # Linearly increasing drop-path rate:
+        # Layer 0 gets 0.0, last layer gets drop_path_max
+        # This preserves low-level features while regularizing high-level ones
+        self.blocks = nn.ModuleList([
+            Block(
+                embed_dim, num_heads, kv_heads,
+                drop_path_rate = drop_path_max * (i / max(num_layers - 1, 1))
+            )
+            for i in range(num_layers)
+        ])
+
+        self.norm = RMSNorm(embed_dim)
+        self.head = nn.Linear(embed_dim, vocab_size, bias=False)
+
+        # Weight tying — lm_head shares embedding weights
         self.head.weight = self.emb.weight
 
         # Causal mask
@@ -201,23 +239,27 @@ class SageStormV2(nn.Module):
         self.register_buffer("causal_mask", mask)
 
         self._init_weights()
-        print(f"[Model] SageStorm V2.1 — {self.param_count()['total_M']}M params "
-              f"({num_layers}L × {embed_dim}d × {num_heads}h, ctx={context_length})")
+        pc = self.param_count()
+        print(f"[Model] SageStorm V2.2 — {pc['total_M']}M params "
+              f"({num_layers}L × {embed_dim}d × {num_heads}h, "
+              f"ctx={context_length}, drop_path_max={drop_path_max})")
 
     def _init_weights(self):
         n   = len(self.blocks)
         std = 0.02
         for name, p in self.named_parameters():
+            if "ls1" in name or "ls2" in name:
+                continue   # LayerScale handled in Block.__init__
             if "weight" in name and p.dim() >= 2:
                 nn.init.normal_(p, 0.0, std)
             elif "bias" in name:
                 nn.init.zeros_(p)
             elif "scale" in name:
                 nn.init.ones_(p)
-        # Depth-scaled output projections (GPT-2 trick)
+        # Depth-scaled output projections (GPT-2 / LLaMA trick)
         for b in self.blocks:
-            nn.init.normal_(b.attn.o.weight, std=std / math.sqrt(2 * n))
-            nn.init.normal_(b.ff.down.weight, std=std / math.sqrt(2 * n))
+            nn.init.normal_(b.attn.o.weight,  std=std / math.sqrt(2 * n))
+            nn.init.normal_(b.ff.down.weight,  std=std / math.sqrt(2 * n))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, T = x.shape
@@ -246,29 +288,28 @@ class SageStormV2(nn.Module):
         self.eval()
         ids       = list(prompt_ids[-self.context_length :])
         generated = []
-        seen      = {}   # token_id -> count (frequency-based penalty)
+        seen      = {}
 
         for step in range(max_tokens):
-            inp    = torch.tensor([ids[-self.context_length :]], dtype=torch.long, device=device)
+            inp    = torch.tensor([ids[-self.context_length :]], dtype=torch.long,
+                                  device=device)
             logits = self.forward(inp)[0, -1, :].float()
 
-            # Frequency-scaled repetition penalty (harsher for frequent tokens)
+            # Frequency-scaled repetition penalty
             for tid, cnt in seen.items():
                 penalty = repetition_penalty ** min(cnt, 4)
-                logits[tid] = logits[tid] / penalty if logits[tid] > 0 else logits[tid] * penalty
+                logits[tid] = logits[tid] / penalty if logits[tid] > 0 \
+                              else logits[tid] * penalty
 
-            # Enforce min_tokens — block EOS until minimum reached
             if step < min_tokens:
                 logits[eos_id] = float("-inf")
 
             logits /= max(temperature, 1e-6)
 
-            # Top-k
             if top_k > 0:
                 kth = torch.topk(logits, min(top_k, logits.size(-1))).values[-1]
                 logits[logits < kth] = float("-inf")
 
-            # Top-p nucleus
             probs = F.softmax(logits, dim=-1)
             if top_p < 1.0:
                 sp, si = torch.sort(probs, descending=True)
@@ -299,6 +340,7 @@ class SageStormV2(nn.Module):
                 "kv_heads"       : self.blocks[0].attn.kv_heads,
                 "num_layers"     : len(self.blocks),
                 "dropout"        : self.blocks[0].ff.drop.p,
+                "drop_path_max"  : self.blocks[-1].drop_path_p,
             }
         }, path)
         print(f"[Model] Saved {self.param_count()['total_M']}M params → {path}")
@@ -328,7 +370,13 @@ if __name__ == "__main__":
     m = SageStormV2(use_grad_ckpt=False)
     c = m.param_count()
     print(f"Total params : {c['total_M']}M")
-    print(f"Unique params: {c['unique_M']}M  (weight tying saves {c['total_M']-c['unique_M']:.1f}M)")
+    print(f"Unique params: {c['unique_M']}M  "
+          f"(weight tying saves {c['total_M']-c['unique_M']:.1f}M)")
     x   = torch.randint(0, VOCAB_SIZE, (2, 64))
     out = m(x)
     print(f"Forward: {list(x.shape)} → {list(out.shape)} ✓")
+
+    # Verify drop-path rates increase with depth
+    print("\nDrop-path rates per layer:")
+    for i, blk in enumerate(m.blocks):
+        print(f"  Layer {i:2d}: {blk.drop_path_p:.4f}")

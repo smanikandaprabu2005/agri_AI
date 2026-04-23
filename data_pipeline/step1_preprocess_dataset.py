@@ -23,9 +23,9 @@ import os
 from pathlib import Path
 from collections import Counter
 
-INPUT_FILE      = "data/raw/final_agriculture_training_dataset.jsonl"
-TRAIN_FILE      = "data collection/train_data/train_dataset.jsonl"
-VAL_FILE        = "data collection/val_data/val_dataset.jsonl"
+INPUT_FILE      = "data_pipeline/data/raw/final_agriculture_training_dataset.jsonl"
+TRAIN_FILE      = "data_pipeline/data collection/train_dataset.jsonl"
+VAL_FILE        = "data_pipeline/data collection/val_dataset.jsonl"
 
 MIN_OUTPUT_WORDS  = 10    # ↑ from 5  — removes near-empty outputs
 MAX_OUTPUT_WORDS  = 400   # ↓ from 512 — removes padded/noisy outputs
@@ -36,9 +36,23 @@ RANDOM_SEED       = 42
 # ── Language noise filter ─────────────────────────────────────
 # Agriculture domain must have at least some English keywords
 _AGR_TERMS = re.compile(
-    r"\b(crop|soil|plant|seed|water|fertiliz|pest|disease|rice|wheat|"
-    r"tomato|potato|spray|irrigat|harvest|yield|farm|field|acre|kg|ml)\b", re.I)
-
+    r"\b("
+    r"crop|crops|cropping|cultivation|agriculture|agricultural|agronomy|"
+    r"soil|soils|soilhealth|soilfertility|texture|ph|salinity|alkalinity|"
+    r"plant|plants|planting|seed|seeds|seedling|nursery|sapling|transplant|"
+    r"water|watering|irrigation|irrigat|drip|sprinkler|flood|furrow|rainfed|"
+    r"fertilizer|fertiliz|manure|compost|biofertilizer|organic|urea|dap|mop|"
+    r"npk|nitrogen|phosphorus|potassium|sulphur|sulfur|micronutrient|zinc|iron|boron|manganese|"
+    r"pest|pests|insect|insects|disease|diseases|pathogen|fungus|fungal|bacteria|viral|virus|"
+    r"weed|weeds|herbicide|fungicide|pesticide|insecticide|spray|spraying|"
+    r"rice|paddy|wheat|maize|corn|cotton|tomato|potato|onion|garlic|ginger|turmeric|"
+    r"millet|sorghum|barley|oats|chilli|pepper|cabbage|cauliflower|carrot|radish|okra|brinjal|"
+    r"banana|mango|papaya|grape|apple|coconut|sugarcane|tea|coffee|banana|mango|"
+    r"harvest|harvesting|yield|productivity|acre|hectare|hectares|farm|farmer|farming|field|fields|"
+    r"livestock|dairy|poultry|goat|sheep|fish|fisheries|horticulture|floriculture|sericulture"
+    r")\b",
+    re.I
+)
 def _has_agriculture_content(text: str) -> bool:
     """Ensure at least one agriculture keyword is present."""
     return bool(_AGR_TERMS.search(text))

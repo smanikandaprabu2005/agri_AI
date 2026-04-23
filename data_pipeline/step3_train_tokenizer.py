@@ -27,9 +27,9 @@ from config import VOCAB_SIZE as CONFIG_VOCAB_SIZE
 
 # ── Config ────────────────────────────────────────────────────
 # FIX 1: Removed space from path
-TRAIN_DATASET    = "data collection/train_data/train_dataset.jsonl"
-KNOWLEDGE_CORPUS = "processed/knowledge_corpus.txt"
-CORPUS_FILE      = "tokenizer_corpus.txt"
+TRAIN_DATASET    = "data_pipeline/data collection/train_dataset.jsonl"
+KNOWLEDGE_CORPUS = "data_pipeline/processed/knowledge_corpus.txt"
+CORPUS_FILE      = "data_pipeline/processed/tokenizer_corpus.txt"
 MODEL_PREFIX     = "sage_tokenizer"
 MODEL_TYPE       = "unigram"
 CHARACTER_COV    = 0.9995
