@@ -24,7 +24,10 @@ from config import (
     FINETUNED_CKPT, RETRIEVER_DIR, DEFAULT_CITY, DEVICE,
     GEN_TEMPERATURE, GEN_MAX_TOKENS
 )
+from dotenv import load_dotenv
+import os
 
+load_dotenv()
 VECTOR_DB_DIR = os.path.join("saved_models", "vector_index")
 
 DEMO_QUERIES = [
@@ -73,11 +76,11 @@ def load_system(weights_path, api_key, city, temperature, max_tokens, use_vector
     # Build context builder (V2 if VectorDB available, V1 otherwise)
     if vector_db is not None:
         from rag.context_builder_v2 import ContextBuilderV2
-        ctx = ContextBuilderV2(ret, memory, weather, vector_db=vector_db, top_k=5)
+        ctx = ContextBuilderV2(ret, memory, weather, vector_db=vector_db, top_k=3)
         print("[Main] Using ContextBuilderV2 (FAISS + BM25 + Word2Vec)")
     else:
         from rag.context_builder import ContextBuilder
-        ctx = ContextBuilder(ret, memory, weather, top_k=5)
+        ctx = ContextBuilder(ret, memory, weather, top_k=3)
         print("[Main] Using ContextBuilder (Word2Vec only)")
 
     # Load SageStorm model
@@ -141,3 +144,49 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+"""
+1. Crop Recommendation (should NOT give IPM 😄)
+
+Use these to test your routing:
+
+Which crop is best for loamy soil in Tamil Nadu?
+What crops give high yield in Sivakasi region?
+Suggest suitable crops for dryland farming
+Which crop is profitable in summer season?
+Best crop for sandy soil with low rainfall
+🌱 2. Fertilizer Questions (should hit TEMPLATE)
+What is the fertilizer dose for rice?
+How much urea should I apply for paddy?
+Fertilizer schedule for tomato crop
+NPK requirement for groundnut
+When should I apply fertilizers in rice?
+🐛 3. Pest & Disease (important — your weak area)
+How to control stem borers in rice?
+What pesticide should I use for aphids in cotton?
+How to control leaf blight in rice?
+Symptoms of pest attack in tomato
+Organic methods to control pests in vegetables
+🌧️ 4. Weather-based Questions
+Should I spray pesticide today?
+Is it safe to irrigate my field today?
+Will rain affect fertilizer application?
+Best time to spray pesticides?
+Can I sow seeds today based on weather?
+🌾 5. Spacing & Cultivation (your system failed here)
+What is spacing for rice?
+Plant spacing for tomato crop
+How far apart should I plant cotton?
+Seed rate for paddy per acre
+Row spacing for maize
+🧠 6. Context / Memory-Based Questions (VERY IMPORTANT)
+
+Ask in sequence:
+
+I am growing rice in Sivakasi on loamy soil
+What fertilizer should I use?
+How to control pests in my crop?
+What spacing should I follow?
+
+👉 Your system should remember rice, not answer generically.
+"""

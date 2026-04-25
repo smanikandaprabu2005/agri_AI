@@ -186,7 +186,7 @@ def best_passage(retrieved, query: str, min_score: float = 0.08) -> Tuple[Option
         # Score each sentence in the doc
         for sent in re.split(r"[.!\n]+", doc):
             s = sent.strip()
-            if len(s.split()) < 8:
+            if len(s.split()) < 12:
                 continue
             overlap = len(q_words & set(s.lower().split())) / max(len(q_words), 1)
             score   = cos * 0.5 + overlap * 0.5
@@ -223,23 +223,21 @@ def has_repetition(text: str, ngram: int = 5, threshold: float = 0.4) -> bool:
 
 def clean_output(text: str) -> str:
     """Strip prompt artifacts from model output."""
-    for m in ["### Instruction:", "### Input:", "### Response:", "### Context:",
-              "<unk>", "<pad>", "<bos>", "<eos>"]:
+    if not text:
+        return ""
+
+    # remove tokens only
+    for m in ["<unk>", "<pad>", "<bos>", "<eos>"]:
         text = text.replace(m, "")
-    # Collapse repeated words (3+ consecutive)
-    words = text.split()
-    out, prev, cnt = [], None, 0
-    for w in words:
-        if w == prev:
-            cnt += 1
-        else:
-            cnt = 0
-        if cnt < 3:
-            out.append(w)
-        prev = w
-    text = " ".join(out)
+
+    # remove heading markers and response labels
+    text = re.sub(r"(?im)^\s*#{1,3}\s*", "", text, flags=re.M)
+    text = re.sub(r"(?im)^\s*(response|question|answer)\s*[:\-]?\s*", "", text, flags=re.M)
+    text = re.sub(r"\b(question|answer|response)\b[:\-]?", "", text, flags=re.I)
+
     text = re.sub(r"\s+", " ", text).strip()
-    return (text[0].upper() + text[1:]) if text else text
+
+    return text
 
 
 def truncate(text: str, max_sent: int = 5) -> str:
@@ -254,20 +252,54 @@ def is_coherent(text: str, min_words: int = 8) -> bool:
     real = sum(1 for w in words if re.match(r"^[a-zA-Z]{2,}$", w))
     return real / len(words) > 0.35
 
+BAD_WORDS = ["scanl", "unknown", "chemical x"]
+
+INVALID_PATTERNS = [
+    "principal unique",
+    "cnbl",
+    "question:",
+    "###",
+]
+
+def has_hallucinated_terms(text: str) -> bool:
+    return any(w in text.lower() for w in BAD_WORDS)
+
+def has_bad_patterns(text: str) -> bool:
+    return any(p in text.lower() for p in INVALID_PATTERNS)
+
+def is_relevant(query: str, text: str) -> bool:
+    keywords = [w for w in re.findall(r"\b[a-z]{4,}\b", query.lower())]
+    answer = text.lower()
+    return any(k in answer for k in keywords)
+
+def score_rag_answer(text: str) -> int:
+    score = 0
+    if is_coherent(text):
+        score += 1
+    if not has_repetition(text):
+        score += 1
+    if len(text.split()) > 6:
+        score += 1
+    if "question" not in text.lower():
+        score += 1
+    if not has_hallucinated_terms(text):
+        score += 1
+    if not has_bad_patterns(text):
+        score += 1
+    return score
+
+def is_valid_rag_answer(text: str) -> bool:
+    return score_rag_answer(text) >= 4  # Keep for backward compatibility if needed
+
 
 # ══════════════════════════════════════════════════════════════
 #  Response Generator
 # ══════════════════════════════════════════════════════════════
 class ResponseGenerator:
     _FALLBACK = [
-        "I don't have specific information on that. Please consult your local "
-        "agricultural extension officer or Krishi Vigyan Kendra (KVK).",
-        "That's outside my current knowledge. Contact your nearest KVK for "
-        "detailed and locally-relevant advice.",
-        "I'm not certain about this. Please consult an agricultural expert or "
-        "your district agriculture office.",
-        "For the most accurate guidance on this, please contact your nearest "
-        "Krishi Vigyan Kendra (KVK) or the ICAR helpline.",
+        "Please provide more details about your crop or problem so I can help better.",
+        "I need more information about your specific situation to give accurate advice.",
+        "Could you tell me more about your farming conditions or the issue you're facing?",
     ]
     _fi = 0
 
@@ -285,16 +317,36 @@ class ResponseGenerator:
         if self.model is None:
             return ""
         try:
-            prompt  = build_rag_prompt(query, context) if context.strip() else build_prompt(query)
+            prompt = (
+                "You are an expert agriculture assistant.\n"
+                "Use ONLY the information from the context below.\n"
+                "If the context is not relevant, say you don't know.\n"
+                "Answer in 3–5 clear bullet points.\n"
+                "- Do NOT change crop\n"
+                "- Do NOT invent information\n"
+                "- Do NOT include 'question' or 'answer' labels\n"
+                "- Give clear, practical advice\n\n"
+                f"Context:\n{context}\n\n"
+                f"Question:\n{query}\n\n"
+                "Answer:\n"
+            )
             ids     = self.tokenizer.encode_prompt(prompt)
             gen_ids = self.model.generate(
                 ids, max_tokens=self.max_tokens,
-                temperature=self.temperature, device=DEVICE,
+                temperature=0.3, device=DEVICE,
             )
             return self.tokenizer.decode(gen_ids, skip_special=True)
         except Exception as e:
             print(f"[Generator] SLM error: {e}")
             return ""
+
+    def _summarize_passage(self, query: str, passage: str) -> str:
+        passage = re.sub(r"\d+$", "", passage).strip()
+        raw = self._slm_generate(query, passage)
+        summary = truncate(clean_output(raw))
+        if not summary.strip() or len(summary.split()) < 3:
+            return passage
+        return summary
 
     def generate(self, query: str) -> Tuple[str, str]:
         """
@@ -319,30 +371,80 @@ class ResponseGenerator:
         passage, confidence = best_passage(retrieved, query)
 
         if passage and confidence >= 0.25:
-            # High-confidence retrieval — answer directly
+            # High-confidence retrieval — use retrieved context to generate a full answer.
+            context, ctx_conf = self.ctx_builder.build_context_str(query)
+            raw = self._slm_generate(query, context)
+            cleaned = truncate(clean_output(raw))
+            crop = self.ctx_builder.memory.get_crop() or ""
+            score = score_rag_answer(cleaned)
+            if (score >= 2
+                    and is_relevant(query, cleaned)
+                    and len(cleaned.split()) > 12
+                    and not cleaned.startswith("N ")
+                    and cleaned and not cleaned[0].islower()
+                    and (not crop or crop.lower() in cleaned.lower())):
+                if needs_weather(query):
+                    try:
+                        loc = self.ctx_builder.memory.get_location() or "Guwahati"
+                        adv = self.ctx_builder.weather_svc.advisory(loc)
+                        cleaned = f"{cleaned}\n\n[Weather advisory] {adv}"
+                    except Exception:
+                        pass
+                return cleaned, "rag_generated"
+            summary = self._summarize_passage(query, passage)
+            if is_coherent(summary):
+                return summary, "retrieval_summarized"
+            # Return cleaned if available, else formatted summary
+            result = cleaned if cleaned else f"I found this relevant information:\n\n{summary}"
             if needs_weather(query):
                 try:
                     loc = self.ctx_builder.memory.get_location() or "Guwahati"
                     adv = self.ctx_builder.weather_svc.advisory(loc)
-                    passage = f"{passage}\n\n[Weather advisory] {adv}"
+                    result = f"{result}\n\n[Weather advisory] {adv}"
                 except Exception:
                     pass
-            return passage, "retrieval_high"
+            return result, "retrieval_fallback"
 
         if passage and confidence >= 0.08:
             # Moderate-confidence retrieval — answer with note
-            note = " (Please verify this with your local agriculture officer.)"
-            return passage + note, "retrieval_low"
+            summary = self._summarize_passage(query, passage)
+            crop = self.ctx_builder.memory.get_crop() or ""
+            score = score_rag_answer(summary)
+            if (score >= 2
+                    and is_relevant(query, summary)
+                    and len(summary.split()) > 12
+                    and not summary.startswith("N ")
+                    and summary and not summary[0].islower()
+                    and (not crop or crop.lower() in summary.lower())):
+                return summary, "retrieval_summarized"
+            # Return formatted summary
+            result = f"I found this relevant information:\n\n{summary}"
+            if needs_weather(query):
+                try:
+                    loc = self.ctx_builder.memory.get_location() or "Guwahati"
+                    adv = self.ctx_builder.weather_svc.advisory(loc)
+                    result = f"{result}\n\n[Weather advisory] {adv}"
+                except Exception:
+                    pass
+            return result, "retrieval_fallback"
 
         # ── L4: SageStorm generation ──────────────────────────
         context, ctx_conf = self.ctx_builder.build_context_str(query)
+        if ctx_conf < 0.25:
+            context = ""
         raw     = self._slm_generate(query, context)
         cleaned = truncate(clean_output(raw))
 
-        if (is_coherent(cleaned) and
-                not has_repetition(cleaned) and
-                (is_on_domain(cleaned) or ctx_conf > 0.1)):
-            return cleaned, "sagestorm"
+        score = score_rag_answer(cleaned)
+        if score >= 2:
+            return cleaned, "rag_generated"
+        if passage:
+            summary = self._summarize_passage(query, passage)
+            if is_coherent(summary):
+                return summary, "retrieval_summarized"
+            # Return formatted summary
+            result = f"I found this relevant information:\n\n{summary}"
+            return result, "retrieval_raw"
 
         # ── L5: Fallback ──────────────────────────────────────
         msg    = self._FALLBACK[self._fi % len(self._FALLBACK)]

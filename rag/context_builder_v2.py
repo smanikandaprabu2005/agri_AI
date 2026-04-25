@@ -18,6 +18,10 @@ _SPRAY   = re.compile(r"\b(spray|pesticide|fungicide|insecticide|dose|dosage|che
 _PLANT   = re.compile(r"\b(plant|sow|seed|seedling|transplant|cultivat|growing|spacing|nursery)\b", re.I)
 _SOIL    = re.compile(r"\b(soil|ph|sandy|clay|loam|texture|drainage|organic matter|tilth)\b", re.I)
 _WATER   = re.compile(r"\b(irrigat|water|drip|sprinkler|flood|moisture|drought)\b", re.I)
+_CROP_SELECTION = re.compile(
+    r"\b(best|suitable|suitable crop|recommend(?:ed)? crop|which crop|what crop|crop choice|crop selection|dryland|drought tolerant|low rainfall|rainfed)\b",
+    re.I,
+)
 _HARVEST = re.compile(r"\b(harvest|yield|post.harvest|storage|grading|market)\b", re.I)
 
 INTENT_PATTERNS = {
@@ -25,9 +29,10 @@ INTENT_PATTERNS = {
     "disease_management": _DISEASE,
     "fertilization":      _FERT,
     "spray_advisory":     _SPRAY,
+    "irrigation":         _WATER,
+    "crop_selection":     _CROP_SELECTION,
     "planting":           _PLANT,
     "soil_management":    _SOIL,
-    "irrigation":         _WATER,
     "harvest_storage":    _HARVEST,
 }
 
@@ -44,6 +49,7 @@ def expand_query(query: str, intent: str) -> str:
         "disease_management": "disease treatment fungicide prevention control",
         "fertilization":      "fertilizer dose application nutrient management",
         "spray_advisory":     "spray dose ml litre application pesticide",
+        "crop_selection":     "crop suitability recommendation dryland rainfed drought tolerant crop choice",
         "planting":           "planting spacing transplant seedling cultivation",
         "soil_management":    "soil preparation amendment organic matter pH",
         "irrigation":         "water requirement irrigation schedule method",
@@ -68,7 +74,7 @@ class ContextBuilderV2:
         memory,
         weather_svc,
         vector_db=None,
-        top_k: int = 5,
+        top_k: int = 3,
         context_max_chars: int = 1200,
         use_vector_db: bool = True,
     ):
@@ -103,10 +109,15 @@ class ContextBuilderV2:
         if self.use_vector_db:
             expanded    = expand_query(query, intent)
             vdb_results = self.vector_db.search(
-                expanded, top_k=self.top_k, min_score=0.15
+                expanded, top_k=self.top_k, min_score=0.35
             )
             for r in vdb_results:
-                snippet = r["text"][:300].strip()
+                snippet = r["text"].strip()
+                if len(snippet.split()) < 15:
+                    continue
+                if snippet.count("(") > 3 or snippet.count(":") > 5:
+                    continue
+                snippet = snippet[:250].strip()
                 if snippet in seen_text:
                     continue
                 seen_text.add(snippet)
@@ -145,12 +156,13 @@ class ContextBuilderV2:
         results = []
         if self.use_vector_db:
             expanded    = expand_query(query, detect_intent(query))
-            vdb_results = self.vector_db.search(expanded, top_k=self.top_k)
+            vdb_results = self.vector_db.search(expanded, top_k=self.top_k, min_score=0.35)
             for r in vdb_results:
-                results.append((r["score"], r["text"]))
+                if len(r["text"].split()) >= 20:
+                    results.append((r["score"], r["text"]))
         if len(results) < self.top_k:
             w2v = self.retriever.retrieve(query, top_k=self.top_k)
-            results.extend(w2v)
+            results.extend([(score, text) for score, text in w2v if len(text.split()) >= 20])
         return results[:self.top_k]
 
     def get_intent(self, query: str) -> str:

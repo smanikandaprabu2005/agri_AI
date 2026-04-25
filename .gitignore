@@ -9,7 +9,7 @@ saved_models/
 *.pt
 *.bin
 *.ckpt
-
+.env
 # large data
 *.jsonl
 *.json

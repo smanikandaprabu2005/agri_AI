@@ -120,7 +120,7 @@ GEN_REP_PENALTY   = 1.3
 GEN_MIN_TOKENS    = 10
 
 # ── Weather ───────────────────────────────────────────────────
-DEFAULT_CITY      = "Guwahati"
+DEFAULT_CITY      = "Sivakasi"
 WEATHER_CACHE_MIN = 30
 
 # ── UI ────────────────────────────────────────────────────────

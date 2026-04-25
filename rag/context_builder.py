@@ -36,6 +36,9 @@ _INTENTS = [
     ("irrigation",          re.compile(
         r"\b(irrigat|water|drip|sprinkler|flood|furrow|moisture|drought|"
         r"rainwater|rain.?fed|dry)\b", re.I)),
+    ("crop_selection",      re.compile(
+        r"\b(best|suitable|suitable crop|recommend(?:ed)? crop|which crop|what crop|"
+        r"crop choice|crop selection|dryland|drought tolerant|low rainfall|rainfed)\b", re.I)),
     ("planting",            re.compile(
         r"\b(plant|sow|seed|seedling|transplant|cultivat|growing|spacing|"
         r"density|nursery|germination|dibbling)\b", re.I)),

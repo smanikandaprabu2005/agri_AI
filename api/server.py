@@ -29,6 +29,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from main_v2 import load_system as load_system_v2
+from config import DEFAULT_CITY, GEN_TEMPERATURE, GEN_MAX_TOKENS, FINETUNED_CKPT, RETRIEVER_DIR
+from weather.weather_api import WeatherService
+
+# ── VectorDB Configuration ──────────────────────────────────
+VECTOR_DB_DIR = os.path.join("saved_models", "vector_index")
 
 # ── Request / Response Models ─────────────────────────────────
 class ChatRequest(BaseModel):
@@ -74,10 +80,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ── Load config defaults ──────────────────────────────────────
+
 # ── Lazy load system (loaded once on first request) ────────────
 _system = None
 _load_error = None
-
+@app.on_event("startup")
+def startup_event():
+    """Eagerly load the RAG system when the FastAPI server starts."""
+    try:
+        _load_system()
+        print("[API] Startup complete — system loaded")
+    except Exception as e:
+        print(f"[API] Startup load failed: {e}")
+        raise
 def _load_system():
     global _system, _load_error
     if _system is not None:
@@ -86,58 +102,43 @@ def _load_system():
         raise RuntimeError(_load_error)
 
     try:
-        from config import FINETUNED_CKPT, RETRIEVER_DIR, DEFAULT_CITY, DEVICE, GEN_TEMPERATURE, GEN_MAX_TOKENS
-        from retrieval.vector_search import load_retriever
-        from memory.memory_manager import MemoryManager
-        from weather.weather_api import WeatherService
-        from rag.context_builder import ContextBuilder
-        from chatbot.response_generator import ResponseGenerator
-        from models.tokenizer import SageTokenizer
-
-        print("[API] Loading system components...")
-        try:
-            ret, vocab = load_retriever(RETRIEVER_DIR)
-        except Exception as e:
-            print(f"  [!] Retriever not found: {e}")
-            ret, vocab = None, None
-
-        if ret is None:
-            class DummyRetriever:
-                def retrieve(self, query, top_k=5):
-                    return []
-            ret = DummyRetriever()
-            vocab = None
-        memory = MemoryManager()
-        weather = WeatherService(city=DEFAULT_CITY, api_key=os.environ.get("OWM_API_KEY", ""))
-        ctx = ContextBuilder(ret, memory, weather, top_k=5)
-        tok = SageTokenizer()
-
-        model = None
-        backend = "retrieval-only"
-        try:
-            import torch
-            if os.path.exists(FINETUNED_CKPT):
-                from models.sagestorm_v2 import SageStormV2
-                model = SageStormV2.load(FINETUNED_CKPT, DEVICE)
-                backend = f"SageStorm V2 ({model.param_count()['total_M']}M params)"
-            else:
-                print(f"  [!] Weights not found: {FINETUNED_CKPT}")
-        except ImportError:
-            print("  [!] PyTorch not installed — retrieval-only mode")
-
-        gen = ResponseGenerator(
-            model, tok, ret, ctx,
+        print("[API] Loading system via main_v2...")
+        
+        # Check VectorDB availability
+        vdb_config = os.path.join(VECTOR_DB_DIR, "config.json")
+        use_vector_db = os.path.exists(vdb_config)
+        
+        if use_vector_db:
+            print(f"[API] VectorDB found at {VECTOR_DB_DIR} — enabling hybrid retrieval")
+        else:
+            print(f"[API] VectorDB not found — will use Word2Vec fallback")
+        
+        # Load system with VectorDB support
+        gen, memory = load_system_v2(
+            weights_path=FINETUNED_CKPT,
+            api_key=os.environ.get("OWM_API_KEY", ""),
+            city=DEFAULT_CITY,
+            temperature=GEN_TEMPERATURE,
             max_tokens=GEN_MAX_TOKENS,
-            temperature=GEN_TEMPERATURE
+            use_vector_db=use_vector_db  # Use VectorDB if available
         )
-
+        
+        # Get backend info from response generator's context builder
+        ctx_builder = gen.ctx_builder
+        backend_info = "ContextBuilderV2 (VectorDB + Word2Vec Hybrid)" if hasattr(ctx_builder, 'use_vector_db') and ctx_builder.use_vector_db else "ContextBuilder (Word2Vec)"
+        
+        weather = WeatherService(city=DEFAULT_CITY, api_key=os.environ.get("OWM_API_KEY", ""))
+        
         _system = {
             "gen": gen,
             "memory": memory,
             "weather": weather,
-            "backend": backend,
+            "backend": backend_info,
+            "vector_db_enabled": use_vector_db,
+            "context_builder": ctx_builder,
         }
-        print(f"[API] Ready — backend: {backend}")
+        print(f"[API] Ready — backend: {_system['backend']}")
+        print(f"[API] Generator sources: template | rag_generated | retrieval_summarized | retrieval_fallback | fallback\n")
         return _system
 
     except Exception as e:
@@ -166,10 +167,38 @@ def health():
         return {
             "status": "ok",
             "backend": sys_state["backend"],
+            "vector_db_enabled": sys_state["vector_db_enabled"],
             "timestamp": datetime.now().isoformat(),
         }
     except Exception as e:
         return {"status": "degraded", "error": str(e)}
+
+
+@app.get("/context")
+def get_context_info(query: str):
+    """Debug endpoint to inspect context builder behavior."""
+    try:
+        sys_state = _load_system()
+        ctx_builder = sys_state["context_builder"]
+        
+        intent = ctx_builder.get_intent(query)
+        retrieved = ctx_builder.get_retrieved(query)
+        context_str, confidence = ctx_builder.build_context_str(query)
+        
+        return {
+            "query": query,
+            "intent": intent,
+            "context_length": len(context_str),
+            "confidence": confidence,
+            "retrieved_count": len(retrieved),
+            "retrieved_docs": [
+                {"score": float(score), "text": text[:200]} 
+                for score, text in retrieved[:3]
+            ],
+            "context_preview": context_str[:500] + ("..." if len(context_str) > 500 else ""),
+        }
+    except Exception as e:
+        raise HTTPException(500, str(e))
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -184,23 +213,35 @@ def chat(req: ChatRequest):
         sys_state = _load_system()
         gen = sys_state["gen"]
         memory = sys_state["memory"]
+        ctx_builder = sys_state["context_builder"]
 
-        # Process input (updates farmer profile)
+        # Process input (updates farmer profile via memory)
         memory.process_input(req.query)
 
         # Update weather city if provided
-        if req.city and req.city != sys_state["weather"].city:
-            sys_state["weather"].city = req.city
+        if req.city:
+            ctx_builder.weather_svc.city = req.city
 
-        # Generate response
+        # Generate response (uses ContextBuilderV2 internally)
         answer, source = gen.generate(req.query)
 
         # Store response in memory
         memory.add_response(answer)
 
+        # Log context builder state if verbose
+        if req.verbose:
+            intent = ctx_builder.get_intent(req.query)
+            retrieved = ctx_builder.get_retrieved(req.query)
+            print(f"[Chat] Query: {req.query}")
+            print(f"[Chat] Detected intent: {intent}")
+            print(f"[Chat] Retrieved {len(retrieved)} documents")
+            print(f"[Chat] Response source: {source}")
+
         # Update stats
         _stats["total_requests"] += 1
-        _stats[f"{source}_hits"] = _stats.get(f"{source}_hits", 0) + 1
+        if source not in _stats:
+            _stats[f"{source}_hits"] = 0
+        _stats[f"{source}_hits"] += 1
 
         latency_ms = round((time.perf_counter() - t0) * 1000, 1)
 
@@ -220,7 +261,12 @@ def get_weather(city: Optional[str] = None):
     """Get weather data for a city."""
     try:
         sys_state = _load_system()
-        w = sys_state["weather"].get(city)
+        ctx_builder = sys_state["context_builder"]
+        
+        if city:
+            ctx_builder.weather_svc.city = city
+        
+        w = ctx_builder.weather_svc.get(city or DEFAULT_CITY)
         return WeatherResponse(
             city=w["city"],
             temp=w["temp"],

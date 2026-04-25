@@ -276,6 +276,8 @@ class VectorDB:
             for bm25_score, idx in bm25_results:
                 if bm25_score <= 0: continue
                 norm_score = min(bm25_score / 20.0, 1.0)  # normalize
+                if norm_score < min_score:
+                    continue
                 if idx in results:
                     results[idx]["score"] = (results[idx]["score"] + norm_score) / 2
                     results[idx]["hybrid"] = True
@@ -288,8 +290,10 @@ class VectorDB:
                         **self.metadatas[idx],
                     }
 
-        # Sort by score, return top_k
+        # Sort by score, filter weak results, return top_k
         sorted_results = sorted(results.values(), key=lambda x: x["score"], reverse=True)
+        if min_score > 0:
+            sorted_results = [r for r in sorted_results if r["score"] >= min_score]
         return sorted_results[:top_k]
 
     def save(self, directory: str):

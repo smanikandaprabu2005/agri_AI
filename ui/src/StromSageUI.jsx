@@ -1,35 +1,44 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 
-// ── Design Tokens ─────────────────────────────────────────────
+// ── Design Tokens (Modern Enhanced) ───────────────────────────
 const THEME = {
-  soil:      "#2A2C24",
-  bark:      "#39442F",
-  moss:      "#31655B",
-  leaf:      "#49806C",
-  sage:      "#6B9B70",
-  sprout:    "#8CC06F",
-  straw:     "#D9C78B",
-  wheat:     "#F0D9A8",
-  cream:     "#F6EFE2",
-  parchment: "#FBF5EA",
-  sky:       "#4D7592",
-  rain:      "#68A8C2",
-  cloud:     "#E2EDF4",
-  emerald:   "#0F9D58",
-  amber:     "#F0B429",
-  indigo:    "#5B67F5",
-  rose:      "#E35A7E",
-  error:     "#BC2B2B",
-  warn:      "#C57C27",
-  info:      "#3B6F91",
-  success:   "#0F9D58",
+  // Modern vibrant palette
+  primary:    "#10B981",    // Emerald green
+  secondary:  "#8B5CF6",    // Purple
+  accent:     "#F59E0B",    // Amber
+  danger:     "#EF4444",    // Red
+  
+  // Refined farming colors
+  soil:       "#1F2937",    // Dark gray
+  bark:       "#374151",    // Medium gray  
+  moss:       "#059669",    // Deep emerald
+  leaf:       "#10B981",    // Bright emerald
+  sage:       "#34D399",    // Light green
+  sprout:     "#6EE7B7",    // Mint green
+  straw:      "#94A3B8",    // Slate
+  wheat:      "#F3F4F6",    // Light gray
+  cream:      "#F9FAFB",    // Off-white
+  parchment:  "#FFFFFF",    // Pure white
+  
+  // Extended palette
+  sky:        "#0284C7",    // Deep blue
+  rain:       "#06B6D4",    // Cyan
+  cloud:      "#E0F2FE",    // Light blue
+  emerald:    "#10B981",    // Emerald
+  amber:      "#F59E0B",    // Amber
+  indigo:     "#6366F1",    // Indigo
+  rose:       "#F43F5E",    // Rose
+  error:      "#DC2626",    // Red
+  warn:       "#D97706",    // Orange
+  info:       "#0284C7",    // Blue
+  success:    "#10B981",    // Green
 };
 
 // ── Inline Styles (no external CSS) ───────────────────────────
 const styles = {
   root: {
-    fontFamily: "'Crimson Pro', 'Georgia', serif",
-    background: "#F6EFE2",
+    fontFamily: "'Inter', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', sans-serif",
+    background: "#FFFFFF",
     height: "100vh",
     display: "flex",
     flexDirection: "column",
@@ -38,8 +47,8 @@ const styles = {
   },
   // Header
   header: {
-    background: `linear-gradient(135deg, ${THEME.leaf} 0%, ${THEME.sage} 100%)`,
-    borderBottom: `3px solid ${THEME.sprout}40`,
+    background: `linear-gradient(135deg, ${THEME.leaf} 0%, ${THEME.primary} 50%, ${THEME.sage} 100%)`,
+    borderBottom: "none",
     padding: "0 32px",
     display: "flex",
     alignItems: "center",
@@ -49,33 +58,34 @@ const styles = {
     position: "sticky",
     top: 0,
     zIndex: 100,
-    boxShadow: "0 4px 18px rgba(0,0,0,0.12)",
+    boxShadow: "0 12px 32px rgba(16, 185, 129, 0.15)",
   },
   logo: {
     display: "flex",
     alignItems: "center",
-    gap: 10,
+    gap: 12,
     cursor: "pointer",
     userSelect: "none",
   },
   logoIcon: {
-    width: 34,
-    height: 34,
+    width: 36,
+    height: 36,
   },
   logoText: {
-    fontFamily: "'Playfair Display', 'Georgia', serif",
+    fontFamily: "'Poppins', sans-serif",
     fontSize: 20,
     fontWeight: 700,
-    color: THEME.wheat,
-    letterSpacing: "0.02em",
+    color: "#FFFFFF",
+    letterSpacing: "-0.01em",
   },
   logoSub: {
-    fontSize: 10,
-    color: THEME.straw,
-    letterSpacing: "0.15em",
+    fontSize: 11,
+    color: "rgba(255,255,255,0.9)",
+    letterSpacing: "0.05em",
     textTransform: "uppercase",
-    marginTop: -2,
+    marginTop: 0,
     display: "block",
+    fontWeight: 500,
   },
   headerRight: {
     display: "flex",
@@ -86,20 +96,21 @@ const styles = {
     display: "flex",
     alignItems: "center",
     gap: 6,
-    background: "rgba(122,173,74,0.15)",
-    border: `1px solid ${THEME.sprout}`,
+    background: "rgba(255,255,255,0.2)",
+    border: "1px solid rgba(255,255,255,0.4)",
     borderRadius: 20,
-    padding: "4px 12px",
+    padding: "6px 14px",
     fontSize: 12,
-    color: THEME.sprout,
+    color: "#FFFFFF",
     fontFamily: "'Source Code Pro', monospace",
     letterSpacing: "0.05em",
+    fontWeight: 500,
   },
   statusDot: {
     width: 7,
     height: 7,
     borderRadius: "50%",
-    background: THEME.sprout,
+    background: "#FFFFFF",
     animation: "pulse 2s infinite",
   },
   // Main layout
@@ -109,47 +120,47 @@ const styles = {
     flex: 1,
     overflow: "hidden",
     height: "calc(100vh - 72px)",
-    background: `linear-gradient(135deg, ${THEME.parchment} 0%, ${THEME.cream} 100%)`,
+    background: "#F8FAFC",
     alignItems: "stretch",
   },
   // Sidebar
   sidebar: {
     width: 300,
-    background: `linear-gradient(180deg, ${THEME.cream} 0%, ${THEME.wheat}10 100%)`,
-    borderRight: `1px solid ${THEME.sage}20`,
+    background: "#FFFFFF",
+    borderRight: "1px solid #E2E8F0",
     display: "flex",
     flexDirection: "column",
     overflow: "hidden",
     flexShrink: 0,
     height: "100%",
-    boxShadow: "2px 0 14px rgba(0,0,0,0.08)",
+    boxShadow: "2px 0 12px rgba(0,0,0,0.05)",
     position: "sticky",
     top: 72,
   },
   sidebarSection: {
-    padding: "20px 20px 12px",
-    borderBottom: `1px solid ${THEME.wheat}40`,
+    padding: "18px 20px 12px",
+    borderBottom: "1px solid #E2E8F0",
   },
   sidebarTitle: {
     fontSize: 11,
     fontFamily: "'Source Code Pro', monospace",
     letterSpacing: "0.15em",
     textTransform: "uppercase",
-    color: THEME.straw,
+    color: THEME.primary,
     marginBottom: 12,
-    fontWeight: 600,
+    fontWeight: 700,
   },
   profileCard: {
-    background: `linear-gradient(135deg, #ffffff 0%, ${THEME.cream} 100%)`,
-    border: `1px solid ${THEME.wheat}50`,
+    background: `linear-gradient(135deg, #F0FDF4 0%, #ECFDF5 100%)`,
+    border: `1.5px solid ${THEME.sage}40`,
     borderRadius: 16,
-    padding: "18px 18px",
-    boxShadow: "0 10px 25px rgba(0,0,0,0.08)",
+    padding: "16px 16px",
+    boxShadow: "0 4px 12px rgba(16, 185, 129, 0.08)",
     transition: "transform 0.25s ease, box-shadow 0.25s ease",
   },
   profileCardHover: {
     transform: "translateY(-2px)",
-    boxShadow: "0 6px 20px rgba(0,0,0,0.12)",
+    boxShadow: "0 8px 20px rgba(16, 185, 129, 0.15)",
   },
   profileRow: {
     display: "flex",
@@ -171,23 +182,23 @@ const styles = {
   },
   // Weather card
   weatherCard: {
-    background: `linear-gradient(135deg, ${THEME.cloud} 0%, ${THEME.cream} 100%)`,
-    border: `1px solid ${THEME.sky}25`,
+    background: `linear-gradient(135deg, #F0F9FF 0%, #E0F2FE 100%)`,
+    border: `1.5px solid ${THEME.sky}30`,
     borderRadius: 16,
-    padding: "18px 18px",
-    boxShadow: "0 12px 26px rgba(0,0,0,0.08)",
+    padding: "16px 16px",
+    boxShadow: "0 4px 12px rgba(2, 132, 199, 0.08)",
     transition: "transform 0.25s ease, box-shadow 0.25s ease",
   },
   weatherCity: {
     fontSize: 13,
-    fontWeight: 600,
+    fontWeight: 700,
     color: THEME.sky,
-    marginBottom: 4,
+    marginBottom: 8,
   },
   weatherGrid: {
     display: "grid",
     gridTemplateColumns: "1fr 1fr",
-    gap: 6,
+    gap: 8,
   },
   weatherItem: {
     fontSize: 12,
@@ -198,16 +209,17 @@ const styles = {
     color: THEME.soil,
   },
   weatherWarn: {
-    marginTop: 8,
-    background: `${THEME.warn}20`,
-    border: `1px solid ${THEME.warn}44`,
-    borderRadius: 6,
-    padding: "6px 8px",
+    marginTop: 10,
+    background: `${THEME.warn}15`,
+    border: `1px solid ${THEME.warn}40`,
+    borderRadius: 8,
+    padding: "8px 10px",
     fontSize: 11,
     color: THEME.warn,
     display: "flex",
-    gap: 5,
+    gap: 6,
     alignItems: "flex-start",
+    fontWeight: 500,
   },
   // Source indicators
   sourceTag: {
@@ -234,10 +246,10 @@ const styles = {
   messages: {
     flex: 1,
     overflowY: "auto",
-    padding: "32px 40px",
+    padding: "32px 48px",
     display: "flex",
     flexDirection: "column",
-    gap: 24,
+    gap: 20,
     scrollBehavior: "smooth",
     scrollbarWidth: "thin",
     scrollbarColor: `${THEME.sage}40 transparent`,
@@ -249,56 +261,55 @@ const styles = {
     flexDirection: "column",
     alignItems: "center",
     justifyContent: "center",
-    padding: "60px 32px",
+    padding: "60px 48px",
     textAlign: "center",
     flex: 1,
   },
   welcomeIcon: {
-    width: 100,
-    height: 100,
+    width: 120,
+    height: 120,
     marginBottom: 32,
-    filter: "drop-shadow(0 4px 8px rgba(0,0,0,0.2))",
+    filter: "drop-shadow(0 8px 16px rgba(0,0,0,0.1))",
   },
   welcomeTitle: {
-    fontFamily: "'Playfair Display', 'Georgia', serif",
-    fontSize: 38,
+    fontFamily: "'Poppins', sans-serif",
+    fontSize: 40,
     fontWeight: 700,
-    color: THEME.leaf,
-    marginBottom: 14,
+    color: THEME.primary,
+    marginBottom: 16,
     lineHeight: 1.15,
-    textShadow: "0 3px 10px rgba(0,0,0,0.08)",
   },
   welcomeSub: {
-    fontSize: 18,
+    fontSize: 16,
     color: THEME.bark,
-    maxWidth: 600,
+    maxWidth: 700,
     lineHeight: 1.7,
     marginBottom: 48,
   },
   suggestionsGrid: {
     display: "grid",
     gridTemplateColumns: "1fr 1fr",
-    gap: 16,
+    gap: 12,
     width: "100%",
     maxWidth: 720,
   },
   suggestionCard: {
-    background: `linear-gradient(135deg, rgba(255,255,255,0.9) 0%, ${THEME.cream} 100%)`,
-    border: `1px solid ${THEME.wheat}60`,
-    borderRadius: 18,
-    padding: "18px 22px",
+    background: `linear-gradient(135deg, #FFFFFF 0%, #F8FAFC 100%)`,
+    border: `1.5px solid #E2E8F0`,
+    borderRadius: 16,
+    padding: "16px 18px",
     cursor: "pointer",
     textAlign: "left",
     transition: "all 0.25s ease",
     display: "flex",
     alignItems: "flex-start",
     gap: 12,
-    boxShadow: "0 14px 30px rgba(0,0,0,0.06)",
+    boxShadow: "0 4px 12px rgba(0,0,0,0.05)",
   },
   suggestionCardHover: {
     transform: "translateY(-4px)",
-    boxShadow: "0 8px 24px rgba(0,0,0,0.15)",
-    borderColor: THEME.sage,
+    boxShadow: "0 12px 28px rgba(16, 185, 129, 0.15)",
+    borderColor: THEME.primary,
   },
   suggestionEmoji: {
     fontSize: 22,
@@ -307,17 +318,17 @@ const styles = {
     marginTop: 1,
   },
   suggestionText: {
-    fontSize: 13,
+    fontSize: 14,
     color: THEME.soil,
-    lineHeight: 1.4,
-    fontFamily: "'Crimson Pro', 'Georgia', serif",
+    lineHeight: 1.5,
+    fontWeight: 500,
   },
   // Message bubbles
   msgRow: {
     display: "flex",
     gap: 12,
     alignItems: "flex-start",
-    maxWidth: 780,
+    maxWidth: 900,
   },
   msgRowUser: {
     flexDirection: "row-reverse",
@@ -335,35 +346,38 @@ const styles = {
     alignItems: "center",
     justifyContent: "center",
     fontSize: 16,
+    fontWeight: 600,
   },
   avatarBot: {
-    background: THEME.moss,
-    border: `2px solid ${THEME.sage}`,
+    background: `linear-gradient(135deg, ${THEME.leaf} 0%, ${THEME.sage} 100%)`,
+    border: "none",
+    color: "#FFFFFF",
   },
   avatarUser: {
-    background: THEME.bark,
-    border: `2px solid ${THEME.straw}`,
+    background: `linear-gradient(135deg, ${THEME.primary} 0%, ${THEME.leaf} 100%)`,
+    border: "none",
+    color: "#FFFFFF",
   },
   bubble: {
-    borderRadius: 20,
-    padding: "16px 20px",
-    maxWidth: 680,
-    lineHeight: 1.65,
-    fontSize: 16,
+    borderRadius: 18,
+    padding: "14px 18px",
+    maxWidth: 700,
+    lineHeight: 1.6,
+    fontSize: 15,
     position: "relative",
-    boxShadow: "0 10px 24px rgba(0,0,0,0.08)",
+    boxShadow: "0 4px 12px rgba(0,0,0,0.06)",
     transition: "transform 0.25s ease",
   },
   bubbleUser: {
-    background: `linear-gradient(135deg, ${THEME.sage} 0%, ${THEME.sprout} 100%)`,
-    color: THEME.parchment,
-    borderBottomRightRadius: 8,
+    background: `linear-gradient(135deg, ${THEME.primary} 0%, ${THEME.leaf} 100%)`,
+    color: "#FFFFFF",
+    borderBottomRightRadius: 6,
   },
   bubbleBot: {
-    background: `linear-gradient(135deg, #ffffff 0%, ${THEME.cloud} 100%)`,
+    background: "#FFFFFF",
     color: THEME.soil,
-    border: `1px solid ${THEME.wheat}40`,
-    borderBottomLeftRadius: 8,
+    border: "1px solid #E2E8F0",
+    borderBottomLeftRadius: 6,
   },
   bubbleFooter: {
     display: "flex",
@@ -381,37 +395,37 @@ const styles = {
   typing: {
     display: "flex",
     gap: 4,
-    padding: "14px 18px",
+    padding: "12px 16px",
     alignItems: "center",
   },
   typingDot: {
-    width: 7,
-    height: 7,
+    width: 8,
+    height: 8,
     borderRadius: "50%",
-    background: THEME.sage,
+    background: THEME.primary,
     animation: "bounce 1.2s infinite",
   },
   // Input area
   inputArea: {
-    borderTop: `2px solid ${THEME.wheat}60`,
-    background: `linear-gradient(180deg, ${THEME.cream} 0%, ${THEME.parchment} 100%)`,
-    padding: "20px 32px 24px",
-    boxShadow: "0 -2px 8px rgba(0,0,0,0.05)",
+    borderTop: "1px solid #E2E8F0",
+    background: "#FFFFFF",
+    padding: "20px 32px 28px",
+    boxShadow: "0 -4px 16px rgba(0,0,0,0.04)",
   },
   inputRow: {
     display: "flex",
     gap: 12,
     alignItems: "flex-end",
-    background: `linear-gradient(135deg, #ffffff 0%, ${THEME.cloud} 100%)`,
-    border: `1px solid ${THEME.wheat}50`,
-    borderRadius: 24,
-    padding: "14px 16px 14px 22px",
+    background: "#F8FAFC",
+    border: "1.5px solid #E2E8F0",
+    borderRadius: 28,
+    padding: "14px 20px 14px 20px",
     transition: "all 0.3s ease",
-    boxShadow: "0 12px 28px rgba(0,0,0,0.06)",
+    boxShadow: "0 4px 12px rgba(0,0,0,0.04)",
   },
   inputRowFocus: {
-    borderColor: THEME.sage,
-    boxShadow: "0 4px 16px rgba(90,122,58,0.2)",
+    borderColor: THEME.primary,
+    boxShadow: "0 0 0 3px rgba(16, 185, 129, 0.1)",
   },
   textarea: {
     flex: 1,
@@ -419,39 +433,40 @@ const styles = {
     outline: "none",
     resize: "none",
     background: "transparent",
-    fontFamily: "'Crimson Pro', 'Georgia', serif",
+    fontFamily: "'Inter', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', sans-serif",
     fontSize: 15,
     color: THEME.soil,
     lineHeight: 1.5,
     minHeight: 24,
     maxHeight: 120,
-    paddingTop: 2,
+    paddingTop: 0,
   },
   sendBtn: {
-    width: 44,
-    height: 44,
-    borderRadius: 14,
+    width: 40,
+    height: 40,
+    borderRadius: 12,
     border: "none",
-    background: THEME.sprout,
-    color: THEME.parchment,
+    background: THEME.primary,
+    color: "#FFFFFF",
     cursor: "pointer",
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
     flexShrink: 0,
     transition: "all 0.2s ease",
-    boxShadow: "0 10px 22px rgba(69,115,85,0.18)",
+    boxShadow: "0 4px 12px rgba(16, 185, 129, 0.2)",
   },
   sendBtnDisabled: {
-    background: THEME.wheat,
+    background: "#E2E8F0",
     color: THEME.straw,
     cursor: "not-allowed",
+    boxShadow: "none",
   },
   inputHints: {
     display: "flex",
     justifyContent: "space-between",
     alignItems: "center",
-    marginTop: 8,
+    marginTop: 10,
     padding: "0 4px",
   },
   hintText: {
@@ -465,44 +480,45 @@ const styles = {
   },
   quickBtn: {
     background: "transparent",
-    border: `1px solid ${THEME.wheat}60`,
+    border: `1px solid #E2E8F0`,
     borderRadius: 12,
     padding: "6px 12px",
-    fontSize: 12,
+    fontSize: 11,
     color: THEME.bark,
     cursor: "pointer",
     fontFamily: "'Source Code Pro', monospace",
     transition: "all 0.2s ease",
+    fontWeight: 500,
   },
   // Right panel
   rightPanel: {
     width: 280,
-    background: `linear-gradient(180deg, ${THEME.cream} 0%, ${THEME.cloud} 100%)`,
-    borderLeft: `1px solid ${THEME.sage}20`,
+    background: "#FFFFFF",
+    borderLeft: "1px solid #E2E8F0",
     display: "flex",
     flexDirection: "column",
     overflow: "hidden",
     flexShrink: 0,
     height: "100%",
-    boxShadow: "-2px 0 14px rgba(0,0,0,0.08)",
+    boxShadow: "-2px 0 12px rgba(0,0,0,0.05)",
     position: "sticky",
     top: 72,
   },
   rightSection: {
-    padding: "20px",
-    borderBottom: `1px solid ${THEME.wheat}40`,
+    padding: "18px 20px",
+    borderBottom: "1px solid #E2E8F0",
   },
   historyItem: {
-    padding: "8px 10px",
-    borderRadius: 8,
+    padding: "10px 12px",
+    borderRadius: 10,
     cursor: "pointer",
-    marginBottom: 4,
-    transition: "background 0.1s",
+    marginBottom: 6,
+    transition: "background 0.15s",
   },
   historyText: {
     fontSize: 12,
     color: THEME.bark,
-    lineHeight: 1.3,
+    lineHeight: 1.4,
     overflow: "hidden",
     textOverflow: "ellipsis",
     whiteSpace: "nowrap",
@@ -511,35 +527,36 @@ const styles = {
     fontSize: 10,
     color: THEME.straw,
     fontFamily: "'Source Code Pro', monospace",
-    marginTop: 2,
+    marginTop: 4,
   },
   // Modal / Settings
   overlay: {
     position: "fixed",
     inset: 0,
-    background: "rgba(44,26,14,0.5)",
+    background: "rgba(0, 0, 0, 0.5)",
     zIndex: 200,
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
   },
   modal: {
-    background: THEME.parchment,
-    border: `2px solid ${THEME.wheat}`,
-    borderRadius: 16,
-    padding: 28,
-    width: 460,
+    background: "#FFFFFF",
+    border: "1.5px solid #E2E8F0",
+    borderRadius: 20,
+    padding: 32,
+    width: 480,
     maxWidth: "90vw",
+    boxShadow: "0 20px 60px rgba(0, 0, 0, 0.15)",
   },
   modalTitle: {
-    fontFamily: "'Playfair Display', 'Georgia', serif",
-    fontSize: 20,
+    fontFamily: "'Poppins', sans-serif",
+    fontSize: 22,
     fontWeight: 700,
-    color: THEME.moss,
-    marginBottom: 20,
+    color: THEME.primary,
+    marginBottom: 24,
   },
   formGroup: {
-    marginBottom: 16,
+    marginBottom: 18,
   },
   label: {
     display: "block",
@@ -548,28 +565,29 @@ const styles = {
     fontFamily: "'Source Code Pro', monospace",
     letterSpacing: "0.1em",
     textTransform: "uppercase",
-    marginBottom: 6,
+    marginBottom: 8,
+    fontWeight: 600,
   },
   input: {
     width: "100%",
-    padding: "9px 12px",
-    border: `1.5px solid ${THEME.wheat}`,
-    borderRadius: 8,
-    background: "#fff",
-    fontFamily: "'Crimson Pro', 'Georgia', serif",
+    padding: "10px 14px",
+    border: "1.5px solid #E2E8F0",
+    borderRadius: 10,
+    background: "#F8FAFC",
+    fontFamily: "'Inter', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', sans-serif",
     fontSize: 14,
     color: THEME.soil,
     outline: "none",
     boxSizing: "border-box",
-    transition: "border-color 0.15s",
+    transition: "border-color 0.15s, box-shadow 0.15s",
   },
   select: {
     width: "100%",
-    padding: "9px 12px",
-    border: `1.5px solid ${THEME.wheat}`,
-    borderRadius: 8,
-    background: "#fff",
-    fontFamily: "'Crimson Pro', 'Georgia', serif",
+    padding: "10px 14px",
+    border: "1.5px solid #E2E8F0",
+    borderRadius: 10,
+    background: "#F8FAFC",
+    fontFamily: "'Inter', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', sans-serif",
     fontSize: 14,
     color: THEME.soil,
     outline: "none",
@@ -577,39 +595,41 @@ const styles = {
   },
   btnRow: {
     display: "flex",
-    gap: 10,
+    gap: 12,
     justifyContent: "flex-end",
-    marginTop: 24,
+    marginTop: 28,
   },
   btnPrimary: {
-    background: THEME.moss,
-    color: THEME.wheat,
+    background: THEME.primary,
+    color: "#FFFFFF",
     border: "none",
-    borderRadius: 10,
-    padding: "10px 24px",
+    borderRadius: 12,
+    padding: "11px 26px",
     fontSize: 14,
-    fontFamily: "'Crimson Pro', 'Georgia', serif",
+    fontFamily: "'Inter', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', sans-serif",
     cursor: "pointer",
     fontWeight: 600,
-    transition: "background 0.15s",
+    transition: "background 0.15s, transform 0.1s",
+    boxShadow: "0 4px 12px rgba(16, 185, 129, 0.2)",
   },
   btnSecondary: {
-    background: "transparent",
+    background: "#F8FAFC",
     color: THEME.bark,
-    border: `1.5px solid ${THEME.wheat}`,
-    borderRadius: 10,
-    padding: "10px 24px",
+    border: "1.5px solid #E2E8F0",
+    borderRadius: 12,
+    padding: "11px 26px",
     fontSize: 14,
-    fontFamily: "'Crimson Pro', 'Georgia', serif",
+    fontFamily: "'Inter', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', sans-serif",
     cursor: "pointer",
+    fontWeight: 600,
     transition: "all 0.15s",
   },
   iconBtn: {
     background: "transparent",
-    border: `1px solid ${THEME.wheat}`,
-    borderRadius: 8,
-    width: 32,
-    height: 32,
+    border: "1px solid #E2E8F0",
+    borderRadius: 10,
+    width: 36,
+    height: 36,
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
@@ -622,10 +642,10 @@ const styles = {
 
 // ── Source Badge Config ────────────────────────────────────────
 const SOURCE_CONFIG = {
-  template:   { bg: "#e8f5e2", color: "#2D5A1B", border: "#7AAD4A44", label: "✦ template" },
-  retrieval:  { bg: "#e3f0f8", color: "#1A4A6B", border: "#3A6B8A44", label: "⟳ retrieval" },
-  sagestorm:  { bg: "#f0ede8", color: "#4A2C1A", border: "#C8A96E44", label: "✧ sagestorm v2" },
-  fallback:   { bg: "#fdf3e3", color: "#6B3B0A", border: "#D4781C44", label: "⚠ fallback" },
+  template:   { bg: "#DBEAFE", color: "#0C4A6E", border: "#0284C744", label: "✦ template" },
+  retrieval:  { bg: "#D1FAE5", color: "#065F46", border: "#10B98144", label: "⟳ retrieval" },
+  sagestorm:  { bg: "#FEE2E2", color: "#7F1D1D", border: "#DC262644", label: "✧ sagestorm v2" },
+  fallback:   { bg: "#FEF3C7", color: "#78350F", border: "#D9703044", label: "⚠ fallback" },
 };
 
 // ── Weather Data (mock) ────────────────────────────────────────
@@ -656,7 +676,7 @@ const QUICK_PHRASES = [
 ];
 
 // ── SVG Icons ─────────────────────────────────────────────────
-const LeafIcon = ({ size = 24, color = THEME.wheat }) => (
+const LeafIcon = ({ size = 24, color = "#FFFFFF" }) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
     <path d="M12 2C7 2 3 7 3 12c0 3 1.5 5.5 4 7l5-5 5 5c2.5-1.5 4-4 4-7 0-5-4-10-9-10z" fill={color} opacity="0.9"/>
     <path d="M12 22V12M12 12C12 12 8 9 6 6M12 12C12 12 16 9 18 6" stroke={color} strokeWidth="1.5" strokeLinecap="round" opacity="0.6"/>
@@ -700,71 +720,27 @@ const CloseIcon = () => (
 // ── Format timestamp ──────────────────────────────────────────
 const fmtTime = (d) => d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
-// ── Simulate API Call (replace with real fetch to your FastAPI) 
-const simulateAPI = async (query, profile) => {
-  await new Promise(r => setTimeout(r, 800 + Math.random() * 600));
-
-  const q = query.toLowerCase();
-
-  // Template-level responses
-  if (q.includes("stem borer") && q.includes("rice")) {
-    return {
-      answer: "To control stem borers in rice: spray Classic-20 at 2 ml/litre of water. Clear field stubbles to remove breeding sites. Apply during tillering and panicle initiation stages for best results. Monitor fields weekly for dead hearts and white ears.",
-      source: "template",
-    };
-  }
-  if (q.includes("aphid") && q.includes("lemon")) {
-    return {
-      answer: "For aphids on lemon trees: spray Malathion 50EC at 2 ml/litre water, every 5 days × 3 times. Avoid spraying on rainy days or when temperatures exceed 35°C. You can also use Neem-based spray (5 ml/litre) as an organic alternative.",
-      source: "template",
-    };
-  }
-  if (q.includes("fertilizer") && (q.includes("rice") || q.includes("paddy"))) {
-    return {
-      answer: "For rice: apply Urea 18 kg/acre + Di-ammonium Phosphate 27 kg/acre + Potassium Chloride 6 kg/acre as base fertilizer. Top-dress with Urea at 9 kg/acre at tillering and panicle initiation stages.",
-      source: "template",
-    };
-  }
-  if (q.includes("late blight") || (q.includes("blight") && q.includes("tomato"))) {
-    return {
-      answer: "For late blight on tomatoes: spray Indofil M-45 at 2.5 g/litre every 7 days. Remove and destroy infected leaves immediately. Improve air circulation by pruning, avoid overhead irrigation, and apply copper-based fungicide as a preventive measure.",
-      source: "template",
-    };
-  }
-  if (q.includes("spray") && (q.includes("today") || q.includes("weather") || q.includes("rain"))) {
-    return {
-      answer: `Based on current weather in ${profile.location || "your area"}: conditions show ${MOCK_WEATHER.rain_pct}% rain probability. ${MOCK_WEATHER.rain_pct > 40 ? "Do NOT spray today — rain will wash off chemicals. Wait for dry weather (2-3 days)." : "Conditions are suitable for spraying. Spray early morning (6–9 AM) or evening to avoid rapid evaporation."}`,
-      source: "retrieval",
-    };
-  }
-  if (q.includes("spacing") && q.includes("banana")) {
-    return {
-      answer: "Banana planting spacing: 1.8 m × 1.8 m between plants and rows. For high-density planting, use 1.5 m × 1.5 m. Ensure proper drainage and choose suckers (sword suckers preferred) of 1–1.5 kg weight.",
-      source: "template",
-    };
-  }
-
-  // Generic SageStorm response
-  const answers = [
-    `Based on agricultural best practices for ${profile.crop_type || "your crop"}: Consult your local Krishi Vigyan Kendra (KVK) for region-specific advice. Soil health testing every 2 years is recommended to calibrate your fertilizer applications accurately.`,
-    `For ${profile.location || "your region"}, the recommended approach is integrated pest management (IPM) — combining biological controls, cultural practices, and targeted chemical application only when pest pressure exceeds economic thresholds.`,
-    `Regular monitoring is key. Scout your fields every 5–7 days. Document observations for pattern recognition. Early intervention prevents yield losses of 20–40% commonly seen with delayed treatment.`,
-  ];
-  return {
-    answer: answers[Math.floor(Math.random() * answers.length)],
-    source: "sagestorm",
-  };
+const normalizeSource = (source) => {
+  if (!source) return "fallback";
+  if (source === "template") return "template";
+  if (["retrieval", "retrieval_summarized", "retrieval_fallback", "retrieval_raw"].includes(source)) return "retrieval";
+  if (["rag_generated", "sagestorm"].includes(source)) return "sagestorm";
+  if (["fallback", "error"].includes(source)) return "fallback";
+  return "fallback";
 };
 
 // ── Source Badge Component ────────────────────────────────────
 const SourceBadge = ({ source }) => {
-  const cfg = SOURCE_CONFIG[source] || SOURCE_CONFIG.fallback;
+  const normalized = normalizeSource(source);
+  const cfg = SOURCE_CONFIG[normalized] || SOURCE_CONFIG.fallback;
   return (
     <span style={{
       ...styles.sourceTag,
       background: cfg.bg,
       color: cfg.color,
       border: `1px solid ${cfg.border}`,
+      fontSize: 10,
+      padding: "3px 8px",
     }}>
       {cfg.label}
     </span>
@@ -775,7 +751,7 @@ const SourceBadge = ({ source }) => {
 const TypingIndicator = () => (
   <div style={{ ...styles.msgRow, ...styles.msgRowBot }}>
     <div style={{ ...styles.avatar, ...styles.avatarBot }}>
-      <LeafIcon size={18} color={THEME.wheat} />
+      <LeafIcon size={18} color="#FFFFFF" />
     </div>
     <div style={{ ...styles.bubble, ...styles.bubbleBot }}>
       <div style={styles.typing}>
@@ -802,7 +778,7 @@ const Message = ({ msg }) => {
         ...styles.avatar,
         ...(isUser ? styles.avatarUser : styles.avatarBot),
       }}>
-        {isUser ? "👤" : <LeafIcon size={18} color={THEME.wheat} />}
+        {isUser ? "👤" : <LeafIcon size={18} color="#FFFFFF" />}
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 4, maxWidth: 600 }}>
         <div style={{
@@ -829,7 +805,7 @@ const SettingsModal = ({ profile, onSave, onClose }) => {
   return (
     <div style={styles.overlay} onClick={e => e.target === e.currentTarget && onClose()}>
       <div style={styles.modal}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24 }}>
           <h2 style={styles.modalTitle}>Farmer Profile & Settings</h2>
           <button style={styles.iconBtn} onClick={onClose}><CloseIcon /></button>
         </div>
@@ -891,14 +867,14 @@ const SettingsModal = ({ profile, onSave, onClose }) => {
           </div>
         </div>
 
-        <div style={{ borderTop: `1px solid ${THEME.wheat}`, paddingTop: 16, marginTop: 8 }}>
+        <div style={{ borderTop: `1px solid #E2E8F0`, paddingTop: 16, marginTop: 8 }}>
           <div style={styles.formGroup}>
-            <label style={styles.label}>API City (Weather)</label>
+            <label style={styles.label}>Weather City (Optional)</label>
             <input
               style={styles.input}
-              value={form.weather_city || "Guwahati"}
+              value={form.weather_city || ""}
               onChange={e => setForm(p => ({ ...p, weather_city: e.target.value }))}
-              placeholder="e.g. Mumbai"
+              placeholder="Leave empty to use auto-detected location"
             />
           </div>
           <div style={styles.formGroup}>
@@ -932,15 +908,16 @@ export default function StromSageUI() {
   const [profile, setProfile]   = useState({
     name: "",
     crop_type: "",
-    location: "Guwahati",
+    location: "",
     soil_type: "",
     farm_size: "",
-    weather_city: "Guwahati",
+    weather_city: "",
     api_url: "http://localhost:8000",
   });
   const [weather, setWeather]   = useState(MOCK_WEATHER);
   const [sessionHistory, setSessionHistory] = useState([]);
   const [inputFocused, setInputFocused] = useState(false);
+  const [userLocation, setUserLocation] = useState({ lat: null, lon: null, city: "" });
 
   const messagesEndRef = useRef(null);
   const textareaRef    = useRef(null);
@@ -958,6 +935,28 @@ export default function StromSageUI() {
     }
   }, [input]);
 
+  // Geolocation on mount
+  useEffect(() => {
+    if (navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+          const { latitude, longitude } = position.coords;
+          setUserLocation({ lat: latitude, lon: longitude, city: "" });
+          // Update profile with user's location
+          setProfile(p => ({
+            ...p,
+            weather_city: p.weather_city || "",
+            location: p.location || "",
+          }));
+        },
+        (error) => {
+          console.log("Geolocation denied or unavailable:", error);
+          setUserLocation({ lat: null, lon: null, city: "Guwahati" });
+        }
+      );
+    }
+  }, []);
+
   // Load profile from server on mount
   useEffect(() => {
     fetch(`${profile.api_url}/profile`)
@@ -966,13 +965,14 @@ export default function StromSageUI() {
       .catch(() => {}); // ignore errors
   }, [profile.api_url]);
 
-  // Load weather
+  // Load weather - use user's location if available
   useEffect(() => {
-    fetch(`${profile.api_url}/weather?city=${encodeURIComponent(profile.weather_city || "Guwahati")}`)
+    const weatherCity = profile.weather_city || userLocation.city || "Guwahati";
+    fetch(`${profile.api_url}/weather?city=${encodeURIComponent(weatherCity)}`)
       .then(res => res.ok ? res.json() : MOCK_WEATHER)
       .then(data => setWeather(data))
       .catch(() => setWeather(MOCK_WEATHER));
-  }, [profile.api_url, profile.weather_city]);
+  }, [profile.api_url, profile.weather_city, userLocation.city]);
 
   // Extract profile updates from messages
   const updateProfileFromText = useCallback((text) => {
@@ -1007,22 +1007,19 @@ export default function StromSageUI() {
 
     setLoading(true);
     try {
-      // Try real API first, fall back to simulation
-      let data;
-      try {
-        const res = await fetch(`${profile.api_url}/chat`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ query: q, city: profile.weather_city || "Guwahati" }),
-          signal: AbortSignal.timeout(8000),
-        });
-        if (res.ok) data = await res.json();
-        else throw new Error("API error");
-      } catch {
-        // Fallback to simulation
-        data = await simulateAPI(q, profile);
+      const res = await fetch(`${profile.api_url}/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: q, city: profile.weather_city || "Guwahati" }),
+        signal: AbortSignal.timeout(30000),
+      });
+
+      if (!res.ok) {
+        const errorText = await res.text();
+        throw new Error(`Backend error ${res.status}: ${errorText}`);
       }
 
+      const data = await res.json();
       const botMsg = {
         id: Date.now() + 1,
         role: "bot",
@@ -1032,11 +1029,14 @@ export default function StromSageUI() {
       };
       setMessages(prev => [...prev, botMsg]);
     } catch (err) {
+      const messageText = err?.message
+        ? `Backend request failed: ${err.message}`
+        : "Something went wrong. Please check your connection and try again.";
       setMessages(prev => [...prev, {
         id: Date.now() + 1,
         role: "bot",
-        text: "Something went wrong. Please check your connection and try again.",
-        source: "fallback",
+        text: messageText,
+        source: "error",
         time: new Date(),
       }]);
     } finally {
@@ -1059,44 +1059,53 @@ export default function StromSageUI() {
     <>
       {/* Inject Google Fonts + keyframes */}
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700&family=Crimson+Pro:wght@400;600&family=Source+Code+Pro:wght@400;600&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@600;700&family=Inter:wght@400;500;600&family=Source+Code+Pro:wght@400;600&display=swap');
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { background: ${THEME.parchment}; }
+        html { scroll-behavior: smooth; }
+        body { background: #FFFFFF; }
         @keyframes pulse {
           0%, 100% { opacity: 1; }
-          50% { opacity: 0.4; }
+          50% { opacity: 0.5; }
         }
         @keyframes bounce {
           0%, 100% { transform: translateY(0); }
-          50% { transform: translateY(-5px); }
+          50% { transform: translateY(-6px); }
         }
         @keyframes fadeIn {
           from { opacity: 0; transform: translateY(10px); }
           to { opacity: 1; transform: translateY(0); }
         }
-        ::-webkit-scrollbar { width: 8px; }
-        ::-webkit-scrollbar-track { background: ${THEME.cream}; }
-        ::-webkit-scrollbar-thumb { background: ${THEME.wheat}; border-radius: 4px; }
-        ::-webkit-scrollbar-thumb:hover { background: ${THEME.straw}; }
-        textarea::placeholder { color: ${THEME.straw}; opacity: 0.75; }
-        .suggestion-card { transition: all 0.25s ease; }
+        @keyframes slideIn {
+          from { opacity: 0; transform: translateX(-10px); }
+          to { opacity: 1; transform: translateX(0); }
+        }
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: #F8FAFC; }
+        ::-webkit-scrollbar-thumb { background: #CBD5E1; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #94A3B8; }
+        textarea::placeholder { color: #94A3B8; opacity: 0.8; }
+        input::placeholder { color: #94A3B8; opacity: 0.8; }
+        .suggestion-card { animation: slideIn 0.3s ease-out; }
         .suggestion-card:hover { 
-          background: linear-gradient(135deg, rgba(255,255,255,0.95) 0%, ${THEME.wheat}25 100%) !important; 
-          border-color: ${THEME.sprout} !important; 
-          transform: translateY(-4px); 
-          box-shadow: 0 16px 36px rgba(0,0,0,0.12) !important;
+          background: linear-gradient(135deg, #FFFFFF 0%, #F0FDF4 100%) !important; 
+          border-color: ${THEME.primary} !important; 
+          transform: translateY(-6px) !important; 
+          box-shadow: 0 20px 36px rgba(16, 185, 129, 0.15) !important;
         }
         .profile-card { transition: all 0.3s ease; }
-        .profile-card:hover { transform: translateY(-3px); box-shadow: 0 8px 22px rgba(0,0,0,0.12) !important; }
+        .profile-card:hover { transform: translateY(-2px); box-shadow: 0 12px 24px rgba(16, 185, 129, 0.12) !important; }
         .weather-card { transition: all 0.3s ease; }
-        .weather-card:hover { transform: translateY(-3px); box-shadow: 0 10px 26px rgba(0,0,0,0.12) !important; }
+        .weather-card:hover { transform: translateY(-2px); box-shadow: 0 12px 24px rgba(2, 132, 199, 0.12) !important; }
         .input-row { transition: all 0.3s ease; }
-        .input-row:focus-within { border-color: ${THEME.sprout} !important; box-shadow: 0 0 0 4px rgba(140,192,111,0.18) !important; }
+        .input-row:focus-within { border-color: ${THEME.primary} !important; box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.1) !important; }
         .message-bubble { animation: fadeIn 0.4s ease-out; }
-        .quick-btn:hover { background: ${THEME.wheat}25 !important; border-color: ${THEME.sage} !important; }
-        .history-item:hover { background: ${THEME.wheat}35 !important; }
-        .icon-btn:hover { background: ${THEME.wheat}30 !important; }
-        .send-btn:hover:not(:disabled) { background: ${THEME.sprout} !important; transform: scale(1.04); }
+        .quick-btn:hover { background: #F0FDF4 !important; border-color: ${THEME.primary} !important; color: ${THEME.primary} !important; }
+        .history-item:hover { background: #F8FAFC !important; }
+        .icon-btn:hover { background: #F8FAFC !important; border-color: ${THEME.primary} !important; color: ${THEME.primary} !important; }
+        .send-btn:hover:not(:disabled) { background: #059669 !important; transform: scale(1.06); }
+        .send-btn:active:not(:disabled) { transform: scale(0.98); }
+        button:focus { outline: 2px solid ${THEME.primary}; outline-offset: 2px; }
+        input:focus, textarea:focus { outline: 2px solid ${THEME.primary}; outline-offset: 2px; }
       `}</style>
 
       <div style={styles.root}>
@@ -1104,9 +1113,9 @@ export default function StromSageUI() {
         <header style={styles.header}>
           <div style={styles.logo}>
             <svg style={styles.logoIcon} viewBox="0 0 34 34" fill="none">
-              <circle cx="17" cy="17" r="16" fill={THEME.moss} />
-              <path d="M17 6C12 6 8 11 8 16c0 2.5 1 4.5 3 6l6-6 6 6c2-1.5 3-3.5 3-6 0-5-4-10-9-10z" fill={THEME.sprout}/>
-              <path d="M17 28V18M17 18C17 18 14 16 12 13M17 18C17 18 20 16 22 13" stroke={THEME.wheat} strokeWidth="1.5" strokeLinecap="round"/>
+              <circle cx="17" cy="17" r="16" fill="#FFFFFF" opacity="0.2" />
+              <path d="M17 6C12 6 8 11 8 16c0 2.5 1 4.5 3 6l6-6 6 6c2-1.5 3-3.5 3-6 0-5-4-10-9-10z" fill="#FFFFFF"/>
+              <path d="M17 28V18M17 18C17 18 14 16 12 13M17 18C17 18 20 16 22 13" stroke="#FFFFFF" strokeWidth="1.5" strokeLinecap="round" opacity="0.8"/>
             </svg>
             <div>
               <span style={styles.logoText}>Strom Sage</span>
@@ -1120,7 +1129,7 @@ export default function StromSageUI() {
               SageStorm V2 · RAG Active
             </div>
             <button
-              style={{ ...styles.iconBtn, border: `1px solid ${THEME.sage}44`, color: THEME.wheat }}
+              style={{ ...styles.iconBtn, border: `1px solid rgba(255,255,255,0.3)`, color: "#FFFFFF", background: "rgba(255,255,255,0.1)" }}
               className="icon-btn"
               onClick={() => setShowSettings(true)}
             >
@@ -1128,7 +1137,7 @@ export default function StromSageUI() {
             </button>
             {messages.length > 0 && (
               <button
-                style={{ ...styles.iconBtn, border: `1px solid ${THEME.sage}44`, color: THEME.wheat }}
+                style={{ ...styles.iconBtn, border: `1px solid rgba(255,255,255,0.3)`, color: "#FFFFFF", background: "rgba(255,255,255,0.1)" }}
                 className="icon-btn"
                 onClick={clearChat}
                 title="Clear chat"
@@ -1188,16 +1197,18 @@ export default function StromSageUI() {
                 )}
                 <button
                   style={{
-                    marginTop: 10,
+                    marginTop: 12,
                     width: "100%",
-                    padding: "7px",
+                    padding: "8px",
                     background: "transparent",
-                    border: `1px dashed ${THEME.wheat}`,
-                    borderRadius: 7,
+                    border: `1.5px dashed ${THEME.primary}40`,
+                    borderRadius: 10,
                     fontSize: 12,
-                    color: THEME.bark,
+                    color: THEME.primary,
                     cursor: "pointer",
                     fontFamily: "'Source Code Pro', monospace",
+                    fontWeight: 600,
+                    transition: "all 0.2s",
                   }}
                   onClick={() => setShowSettings(true)}
                 >
@@ -1210,13 +1221,13 @@ export default function StromSageUI() {
             <div style={styles.sidebarSection}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
                 <div style={styles.sidebarTitle}>Weather</div>
-                <button style={{ ...styles.iconBtn, width: 24, height: 24, border: "none" }} className="icon-btn">
+                <button style={{ ...styles.iconBtn, width: 24, height: 24, border: "none", background: "transparent" }} className="icon-btn">
                   <RefreshIcon />
                 </button>
               </div>
               <div style={styles.weatherCard} className="weather-card">
                 <div style={styles.weatherCity}>
-                  📍 {profile.weather_city || "Guwahati"}
+                  📍 {profile.weather_city || userLocation.city || "Your Location"}
                   <span style={{ fontSize: 10, color: THEME.sky, marginLeft: 6 }}>{weather.src}</span>
                 </div>
                 <div style={{ fontSize: 28, fontWeight: 700, color: THEME.sky, margin: "6px 0" }}>
@@ -1244,66 +1255,15 @@ export default function StromSageUI() {
                 {!weather.rain && (
                   <div style={{
                     ...styles.weatherWarn,
-                    background: "#e8f5e222",
-                    border: `1px solid ${THEME.sage}33`,
-                    color: THEME.sage,
+                    background: "#D1FAE520",
+                    border: `1px solid ${THEME.success}40`,
+                    color: THEME.success,
                     marginTop: 8,
                   }}>
                     ✓ Good conditions for field operations
                   </div>
                 )}
               </div>
-            </div>
-
-            {/* Model Info */}
-            <div style={styles.sidebarSection}>
-              <div style={styles.sidebarTitle}>Model Info</div>
-              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                {[
-                  ["Model", "SageStorm V2"],
-                  ["Parameters", "48M"],
-                  ["Context", "512 tokens"],
-                  ["Architecture", "GPT + GQA + RoPE"],
-                  ["RAG", "Word2Vec + BM25"],
-                  ["Dataset", "337K samples"],
-                ].map(([k, v]) => (
-                  <div key={k} style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    fontSize: 12,
-                    borderBottom: `1px solid ${THEME.wheat}55`,
-                    paddingBottom: 4,
-                  }}>
-                    <span style={{ color: THEME.straw, fontFamily: "'Source Code Pro', monospace" }}>{k}</span>
-                    <span style={{ color: THEME.bark, fontWeight: 600 }}>{v}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* Response Legend */}
-            <div style={{ padding: "12px 16px" }}>
-              <div style={styles.sidebarTitle}>Response Sources</div>
-              {Object.entries(SOURCE_CONFIG).map(([key, cfg]) => (
-                <div key={key} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-                  <span style={{
-                    ...styles.sourceTag,
-                    background: cfg.bg,
-                    color: cfg.color,
-                    border: `1px solid ${cfg.border}`,
-                    fontSize: 9,
-                    padding: "2px 6px",
-                  }}>
-                    {cfg.label}
-                  </span>
-                  <span style={{ fontSize: 11, color: THEME.straw }}>
-                    {key === "template" && "Rule-based"}
-                    {key === "retrieval" && "RAG document"}
-                    {key === "sagestorm" && "SLM generated"}
-                    {key === "fallback" && "Safe default"}
-                  </span>
-                </div>
-              ))}
             </div>
           </aside>
 
@@ -1314,10 +1274,10 @@ export default function StromSageUI() {
                 /* Welcome Screen */
                 <div style={styles.welcome}>
                   <svg style={styles.welcomeIcon} viewBox="0 0 80 80" fill="none">
-                    <circle cx="40" cy="40" r="38" fill={THEME.moss} opacity="0.1" stroke={THEME.sage} strokeWidth="1.5"/>
-                    <path d="M40 15C28 15 18 26 18 38c0 6 2.5 11 7 14.5L40 38l15 14.5C59.5 49 62 44 62 38c0-12-10-23-22-23z" fill={THEME.sage}/>
-                    <path d="M40 68V44M40 44C40 44 32 39 27 31M40 44C40 44 48 39 53 31" stroke={THEME.moss} strokeWidth="2" strokeLinecap="round"/>
-                    <circle cx="40" cy="40" r="4" fill={THEME.wheat}/>
+                    <circle cx="40" cy="40" r="38" fill={THEME.primary} opacity="0.1" stroke={THEME.primary} strokeWidth="1.5"/>
+                    <path d="M40 15C28 15 18 26 18 38c0 6 2.5 11 7 14.5L40 38l15 14.5C59.5 49 62 44 62 38c0-12-10-23-22-23z" fill={THEME.primary}/>
+                    <path d="M40 68V44M40 44C40 44 32 39 27 31M40 44C40 44 48 39 53 31" stroke={THEME.leaf} strokeWidth="2" strokeLinecap="round"/>
+                    <circle cx="40" cy="40" r="4" fill={THEME.primary}/>
                   </svg>
                   <h1 style={styles.welcomeTitle}>
                     Namaste! I'm Strom Sage 🌿
@@ -1434,8 +1394,8 @@ export default function StromSageUI() {
               {[
                 ["Messages", messages.length],
                 ["Bot responses", messages.filter(m => m.role === "bot").length],
-                ["Template hits", messages.filter(m => m.source === "template").length],
-                ["RAG hits", messages.filter(m => m.source === "retrieval").length],
+                ["Template hits", messages.filter(m => normalizeSource(m.source) === "template").length],
+                ["RAG hits", messages.filter(m => normalizeSource(m.source) === "retrieval").length],
               ].map(([k, v]) => (
                 <div key={k} style={{
                   display: "flex",
