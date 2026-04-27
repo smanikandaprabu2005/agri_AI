@@ -2,13 +2,13 @@
 setup.py
 ========
 One-time setup: builds the hybrid BM25+TF-IDF retriever from your data files.
-Run this ONCE before starting the chatbot.
+Run this ONCE after step 1 completes (which outputs JSONL files).
 
 Usage:
-    python setup.py                         (uses data/*.jsonl)
-    python setup.py --data_dir my_data/     (custom data dir)
-    python setup.py --retriever bm25        (force BM25 only)
-    python setup.py --retriever hybrid      (default: BM25 + TF-IDF)
+    python setup.py                                    (uses data_pipeline/data collection/)
+    python setup.py --data_dir data/                   (custom data dir)
+    python setup.py --retriever bm25                   (force BM25 only)
+    python setup.py --retriever hybrid                 (default: BM25 + TF-IDF)
 """
 
 import os, sys, json, argparse
@@ -20,7 +20,7 @@ from retrieval.vector_search import build_retriever, load_jsonl
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_dir",  default=DATA_DIR)
+    parser.add_argument("--data_dir",  default="data_pipeline/data collection/")
     parser.add_argument("--retriever", default=RETRIEVER_TYPE,
                         choices=["bm25", "tfidf", "hybrid", "word2vec"])
     args = parser.parse_args()

@@ -24,6 +24,7 @@ from pathlib import Path
 from collections import Counter
 
 INPUT_FILE      = "data_pipeline/data/raw/final_agriculture_training_dataset.jsonl"
+CLEANED_INPUT_FILE = "data_pipeline/data/raw/cleaned_final_agriculture_training_dataset.jsonl"
 TRAIN_FILE      = "data_pipeline/data collection/train_dataset.jsonl"
 VAL_FILE        = "data_pipeline/data collection/val_dataset.jsonl"
 
@@ -207,8 +208,13 @@ def main():
     parser.add_argument("--split",      type=float, default=TRAIN_SPLIT)
     args = parser.parse_args()
 
-    if not Path(args.input).exists():
-        print(f"[Step 1] ERROR: Input file not found: {args.input}")
+    input_path = Path(args.input)
+    if args.input == INPUT_FILE and Path(CLEANED_INPUT_FILE).exists():
+        input_path = Path(CLEANED_INPUT_FILE)
+        print(f"[Step 1] Using cleaned dataset: {input_path}")
+
+    if not input_path.exists():
+        print(f"[Step 1] ERROR: Input file not found: {input_path}")
         return
 
     print(f"\n[Step 1] ── Preprocessing Dataset ───────────────")
@@ -218,7 +224,7 @@ def main():
     print(f"  Split  : {int(args.split*100)}/{int((1-args.split)*100)}")
     print(f"─────────────────────────────────────────────────")
 
-    data = load_dataset(args.input)
+    data = load_dataset(str(input_path))
     data = remove_empty(data)
     data = remove_poor_quality(data)
     data = remove_duplicates(data)

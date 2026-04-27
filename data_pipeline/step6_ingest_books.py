@@ -41,7 +41,8 @@ import os, re, json, argparse, sys
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from retrieval.vector_db import VectorDB, clean_text, chunk_text
+from retrieval.vector_db import VectorDB, chunk_text
+from data_cleaning import clean_text
 
 # ── Config ────────────────────────────────────────────────────
 BOOKS_DIR        = "data/books"
@@ -64,20 +65,20 @@ BOOK_CATALOGUE = {
     "Introduction-to-Soil-Science.pdf":     {"name": "Introduction to Soil Science",               "type": "soil_science",    "use": "both"},
     "Soil-Chemistry-Soil-Fertility-Nutrient-Management.pdf": {"name": "Soil Chemistry Soil Fertility Nutrient Management", "type": "soil_science",    "use": "both"},
     "Livestock-Production-and-Management.pdf": {"name": "Livestock Production and Management",     "type": "livestock",       "use": "both"},
-    "Crop-Pests-and-Stored-Grain-Pests.pdf": {"name": "Crop Pests and Stored Grain Pests",         "type": "pest_control",    "use": "rag"},
-    "Disease-of-Horticultural-Crops-and-their-Management.pdf": {"name": "Disease of Horticultural Crops and their Management", "type": "plant_disease",   "use": "rag"},
-    "Diseases-of-Field-Crops-and-Their-Management.pdf": {"name": "Diseases of Field Crops and Their Management", "type": "plant_disease",   "use": "rag"},
-    "Weed-Management.pdf":                  {"name": "Weed Management",                            "type": "weed_management", "use": "rag"},
+    "Crop-Pests-and-Stored-Grain-Pests.pdf": {"name": "Crop Pests and Stored Grain Pests",         "type": "pest_control",    "use": "both"},
+    "Disease-of-Horticultural-Crops-and-their-Management.pdf": {"name": "Disease of Horticultural Crops and their Management", "type": "plant_disease",   "use": "both"},
+    "Diseases-of-Field-Crops-and-Their-Management.pdf": {"name": "Diseases of Field Crops and Their Management", "type": "plant_disease",   "use": "both"},
+    "Weed-Management.pdf":                  {"name": "Weed Management",                            "type": "weed_management", "use": "both"},
     "Manures-Fertilizers-Agrochemicals.pdf": {"name": "Manures Fertilizers Agrochemicals",         "type": "fertilizer",      "use": "both"},
     "Irrigation-Engineering.pdf":           {"name": "Irrigation Engineering",                     "type": "irrigation",      "use": "both"},
-    "Micro-Irrigation-Systems-Design.pdf":  {"name": "Micro Irrigation Systems Design",            "type": "irrigation",      "use": "rag"},
-    "Crop-Pests-and-Stored-Grain-Pests-and-Their-Management.pdf": {"name": "Crop Pests and Stored Grain Pests and Their Management", "type": "pest_control", "use": "rag"},
+    "Micro-Irrigation-Systems-Design.pdf":  {"name": "Micro Irrigation Systems Design",            "type": "irrigation",      "use": "both"},
+    "Crop-Pests-and-Stored-Grain-Pests-and-Their-Management.pdf": {"name": "Crop Pests and Stored Grain Pests and Their Management", "type": "pest_control", "use": "both"},
     "crop_production_and _management.pdf":  {"name": "Crop Production and Management",            "type": "crop_science",    "use": "both"},
-    "Disease-of-Horticultural-Crops-their-Management1.pdf": {"name": "Disease of Horticultural Crops and Their Management", "type": "plant_disease",   "use": "rag"},
+    "Disease-of-Horticultural-Crops-their-Management1.pdf": {"name": "Disease of Horticultural Crops and Their Management", "type": "plant_disease",   "use": "both"},
     "FIELD-CROPS-RABI-with-Multiple-choice-questions.pdf": {"name": "Field Crops Rabi Multiple Choice Questions", "type": "crop_science", "use": "both"},
     "Fundamental-of-Soil-Water-Conservation-Eng.pdf": {"name": "Fundamental of Soil Water Conservation Engineering", "type": "water_management", "use": "both"},
     "iesc112.pdf":                           {"name": "IESC 112 Agriculture Reference",             "type": "agriculture",     "use": "both"},
-    "Post-Harvest-Management-Value-Addition-of-Fruits-vegetable.pdf": {"name": "Post Harvest Management and Value Addition of Fruits and Vegetables", "type": "postharvest", "use": "rag"},
+    "Post-Harvest-Management-Value-Addition-of-Fruits-vegetable.pdf": {"name": "Post Harvest Management and Value Addition of Fruits and Vegetables", "type": "postharvest", "use": "both"},
     "PRINCIPLES-OF-SEED-TECHNOLOGY.pdf":     {"name": "Principles of Seed Technology",              "type": "crop_science",    "use": "both"},
     "Production-Technology-of-Fruit-Crops.pdf": {"name": "Production Technology of Fruit Crops",       "type": "horticulture",    "use": "both"},
     "Production-Technology-of-Spices-Aromatic.pdf": {"name": "Production Technology of Spices and Aromatic Crops", "type": "horticulture", "use": "both"},
