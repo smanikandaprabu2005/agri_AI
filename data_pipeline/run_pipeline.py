@@ -24,7 +24,6 @@ import os
 from pathlib import Path
 
 STEPS = {
-    0: ("data_cleaning.py",                 "Clean raw source data"),
     1: ("step1_preprocess_dataset.py",      "Preprocess instruction dataset"),
     2: ("step2_build_knowledge_corpus.py",   "Build knowledge corpus"),
     3: ("step3_train_tokenizer.py",          "Train SentencePiece tokenizer"),

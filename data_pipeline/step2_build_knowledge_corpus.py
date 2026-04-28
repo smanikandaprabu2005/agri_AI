@@ -36,14 +36,11 @@ import argparse
 from pathlib import Path
 
 # ── Config ────────────────────────────────────────────────────
-ICAR_FILE           = "data_pipeline/data/raw/ICAR_Text_Extracted.json"
-CLEANED_ICAR_FILE   = "data_pipeline/data/raw/cleaned_ICAR_Text_Extracted.json"
-RESEARCH_FILE       = "data_pipeline/data/raw/research_wikipedia_final_dataset.txt"
-CLEANED_RESEARCH_FILE = "data_pipeline/data/raw/cleaned_research_wikipedia_final_dataset.txt"
-BSC_AGRI_FILE       = "data_pipeline/data/raw/bsc agri.txt"          # NEW
-CLEANED_BSC_FILE    = "data_pipeline/data/raw/cleaned_bsc_agri.txt"
-OUTPUT_FILE         = "data_pipeline/processed/knowledge_corpus.txt"
-MIN_SENT_LEN        = 40   # minimum characters per sentence to keep
+ICAR_FILE     = "data_pipeline/data/raw/ICAR_Text_Extracted.json"
+RESEARCH_FILE = "data_pipeline/data/raw/research_wikipedia_final_dataset.txt"
+BSC_AGRI_FILE = "data_pipeline/data/raw/bsc agri.txt"          # NEW
+OUTPUT_FILE   = "data_pipeline/processed/knowledge_corpus.txt"
+MIN_SENT_LEN  = 40   # minimum characters per sentence to keep
 
 
 # ── Text cleaner ──────────────────────────────────────────────
@@ -54,7 +51,12 @@ def clean_text(text: str) -> str:
     text = re.sub(r"Web Url.*",                  " ", text, flags=re.IGNORECASE)
     text = re.sub(r"\b[A-Z]{6,}\b",             " ", text)   # OCR noise
     text = re.sub(r"(.)\1{5,}",                 " ", text)   # repeated chars
-    text = re.sub(r"[^a-zA-Z0-9.,;:()\-\'%/@ ]+", " ", text)  # special symbols
+    # Remove markdown formatting
+    text = re.sub(r"\*\*",                       " ", text)   # bold markers
+    text = re.sub(r"^\s*\*\s+",                 " ", text, flags=re.MULTILINE)  # bullets
+    text = re.sub(r"^#+\s+",                    " ", text, flags=re.MULTILINE)  # headers
+    # Remove special symbols
+    text = re.sub(r"[^a-zA-Z0-9.,;:()\-\'%/@ ]+", " ", text)
     text = re.sub(r"\s+",                        " ", text)   # whitespace
     return text.strip()
 
@@ -160,24 +162,10 @@ def main():
                         help="Skip BSc Agriculture file if not available")
     args = parser.parse_args()
 
-    icar_path = Path(args.icar)
-    research_path = Path(args.research)
-    bsc_path = Path(args.bsc)
-
-    if args.icar == ICAR_FILE and Path(CLEANED_ICAR_FILE).exists():
-        icar_path = Path(CLEANED_ICAR_FILE)
-        print(f"[Step 2] Using cleaned ICAR file: {icar_path}")
-    if args.research == RESEARCH_FILE and Path(CLEANED_RESEARCH_FILE).exists():
-        research_path = Path(CLEANED_RESEARCH_FILE)
-        print(f"[Step 2] Using cleaned research file: {research_path}")
-    if args.bsc == BSC_AGRI_FILE and Path(CLEANED_BSC_FILE).exists():
-        bsc_path = Path(CLEANED_BSC_FILE)
-        print(f"[Step 2] Using cleaned BSc Agri file: {bsc_path}")
-
     # Check required files
     missing = []
-    if not icar_path.exists():     missing.append(str(icar_path))
-    if not research_path.exists(): missing.append(str(research_path))
+    if not Path(args.icar).exists():     missing.append(args.icar)
+    if not Path(args.research).exists(): missing.append(args.research)
     if missing:
         for m in missing:
             print(f"[Step 2] ERROR: File not found: {m}")
@@ -185,7 +173,7 @@ def main():
         return
 
     # Check optional BSc file
-    use_bsc = (not args.no_bsc) and bsc_path.exists()
+    use_bsc = (not args.no_bsc) and Path(args.bsc).exists()
     if not use_bsc and not args.no_bsc:
         print(f"[Step 2] INFO: BSc Agri file not found at {args.bsc}")
         print(f"         Copy bsc_agri.txt to data/raw/ to include it.")
@@ -194,16 +182,16 @@ def main():
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
 
     print(f"\n[Step 2] ── Building Knowledge Corpus ───────────")
-    print(f"  ICAR     : {icar_path}")
-    print(f"  Research : {research_path}")
-    print(f"  BSc Agri : {bsc_path if use_bsc else '(skipped)'}")
+    print(f"  ICAR     : {args.icar}")
+    print(f"  Research : {args.research}")
+    print(f"  BSc Agri : {args.bsc if use_bsc else '(skipped)'}")
     print(f"  Output   : {args.output}")
     print(f"─────────────────────────────────────────────────")
 
     with open(args.output, "w", encoding="utf-8") as out_f:
-        icar_count     = process_icar(str(icar_path), out_f)
-        research_count = process_research(str(research_path), out_f)
-        bsc_count      = process_bsc_agri(str(bsc_path), out_f) if use_bsc else 0
+        icar_count     = process_icar(args.icar, out_f)
+        research_count = process_research(args.research, out_f)
+        bsc_count      = process_bsc_agri(args.bsc, out_f) if use_bsc else 0
 
     total = icar_count + research_count + bsc_count
     size  = Path(args.output).stat().st_size / 1024 / 1024

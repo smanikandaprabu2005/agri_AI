@@ -12,6 +12,7 @@ FIXES:
 import json
 import argparse
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -35,6 +36,15 @@ MODEL_TYPE       = "unigram"
 CHARACTER_COV    = 0.9995
 
 
+def clean_markdown(text: str) -> str:
+    """Remove markdown formatting noise from text."""
+    text = text.replace('**', '')
+    text = re.sub(r'^\s*\*\s+', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^#+\s+', '', text, flags=re.MULTILINE)
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
+
+
 def build_corpus(train_path: str, knowledge_path: str, corpus_path: str) -> int:
     total = 0
     with open(corpus_path, "w", encoding="utf-8") as corpus:
@@ -50,6 +60,10 @@ def build_corpus(train_path: str, knowledge_path: str, corpus_path: str) -> int:
                         out  = item.get("output", "").strip()
                         if not inst or not out:
                             continue
+                        # Clean markdown from all text
+                        inst = clean_markdown(inst)
+                        inp = clean_markdown(inp) if inp else ""
+                        out = clean_markdown(out)
                         if inp:
                             text = (f"### Instruction:\n{inst}\n\n"
                                     f"### Input:\n{inp}\n\n"
@@ -72,6 +86,8 @@ def build_corpus(train_path: str, knowledge_path: str, corpus_path: str) -> int:
                 for line in f:
                     text = line.strip()
                     if len(text) > 50:
+                        # Already cleaned in step2, but apply again for safety
+                        text = clean_markdown(text)
                         corpus.write(text + "\n")
                         knowledge_count += 1
             print(f"[Step 3] Knowledge sentences added : {knowledge_count:,}")

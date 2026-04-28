@@ -42,7 +42,16 @@ MIN_TEXT_LEN    = 30    # skip very short sentences
 
 # ── Cleaner ───────────────────────────────────────────────────
 def clean_line(text: str) -> str:
-    return " ".join(text.replace("\n","").replace("\t","").split()).strip()
+    """Clean whitespace and markdown formatting from text."""
+    text = text.replace("\n", " ").replace("\t", " ")
+    # Remove markdown noise
+    text = text.replace('**', '')
+    import re
+    text = re.sub(r'^\s*\*\s+', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^#+\s+', '', text, flags=re.MULTILINE)
+    # Normalize whitespace
+    text = " ".join(text.split()).strip()
+    return text
 
 
 # ── Tokenize corpus ───────────────────────────────────────────

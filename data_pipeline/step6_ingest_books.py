@@ -41,8 +41,7 @@ import os, re, json, argparse, sys
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from retrieval.vector_db import VectorDB, chunk_text
-from data_cleaning import clean_text
+from retrieval.vector_db import VectorDB, clean_text, chunk_text
 
 # ── Config ────────────────────────────────────────────────────
 BOOKS_DIR        = "data/books"
@@ -51,6 +50,15 @@ PRETRAIN_BOOKS   = "data_pipeline/processed/books_pretrain.txt"
 CHUNK_SIZE       = 256    # words per chunk for RAG
 OVERLAP          = 32     # overlap between chunks
 PRETRAIN_CHUNK   = 512    # larger chunks for pretraining
+
+
+def clean_markdown_content(text: str) -> str:
+    """Clean markdown formatting from text."""
+    text = text.replace('**', '')
+    text = re.sub(r'^\s*\*\s+', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^#+\s+', '', text, flags=re.MULTILINE)
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
 
 
 # ── Source catalogue ─────────────────────────────────────────
@@ -195,6 +203,8 @@ def ingest_source(
         return {"source": name, "chunks_rag": 0, "chunks_pretrain": 0}
 
     cleaned = clean_text(raw)
+    # Remove markdown formatting noise
+    cleaned = clean_markdown_content(cleaned)
     print(f"     Raw chars: {len(raw):,}  →  Cleaned: {len(cleaned):,}")
 
     # For RAG vector DB

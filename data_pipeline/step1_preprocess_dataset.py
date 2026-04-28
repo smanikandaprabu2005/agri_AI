@@ -24,7 +24,6 @@ from pathlib import Path
 from collections import Counter
 
 INPUT_FILE      = "data_pipeline/data/raw/final_agriculture_training_dataset.jsonl"
-CLEANED_INPUT_FILE = "data_pipeline/data/raw/cleaned_final_agriculture_training_dataset.jsonl"
 TRAIN_FILE      = "data_pipeline/data collection/train_dataset.jsonl"
 VAL_FILE        = "data_pipeline/data collection/val_dataset.jsonl"
 
@@ -61,6 +60,16 @@ def _has_agriculture_content(text: str) -> bool:
 # ── Noise detection ───────────────────────────────────────────
 _NOISE = re.compile(r"(\?{5,}|\.{10,}|#{5,}|={10,}|\*{5,})")
 _URL   = re.compile(r"http\S+|www\.\S+")
+
+def _clean_markdown(text: str) -> str:
+    """Remove markdown formatting noise from text."""
+    # Remove bold markers (**)
+    text = text.replace('**', '')
+    # Remove bullet point asterisks at line start
+    text = re.sub(r'^\s*\*\s+', '', text, flags=re.MULTILINE)
+    # Normalize whitespace
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
 
 def _is_noisy(text: str) -> bool:
     """Detect excessively noisy text."""
@@ -162,6 +171,19 @@ def remove_duplicates(data: list) -> list:
     return unique
 
 
+def clean_markdown_noise(data: list) -> list:
+    """Remove markdown formatting noise from all data items."""
+    for item in data:
+        if "instruction" in item:
+            item["instruction"] = _clean_markdown(item["instruction"])
+        if "output" in item:
+            item["output"] = _clean_markdown(item["output"])
+        if "input" in item:
+            item["input"] = _clean_markdown(item["input"])
+    print(f"[Step 1] Markdown cleaned")
+    return data
+
+
 def print_stats(data: list):
     inst_lens = [len(d["instruction"].split()) for d in data]
     out_lens  = [len(d["output"].split())      for d in data]
@@ -208,13 +230,8 @@ def main():
     parser.add_argument("--split",      type=float, default=TRAIN_SPLIT)
     args = parser.parse_args()
 
-    input_path = Path(args.input)
-    if args.input == INPUT_FILE and Path(CLEANED_INPUT_FILE).exists():
-        input_path = Path(CLEANED_INPUT_FILE)
-        print(f"[Step 1] Using cleaned dataset: {input_path}")
-
-    if not input_path.exists():
-        print(f"[Step 1] ERROR: Input file not found: {input_path}")
+    if not Path(args.input).exists():
+        print(f"[Step 1] ERROR: Input file not found: {args.input}")
         return
 
     print(f"\n[Step 1] ── Preprocessing Dataset ───────────────")
@@ -224,10 +241,11 @@ def main():
     print(f"  Split  : {int(args.split*100)}/{int((1-args.split)*100)}")
     print(f"─────────────────────────────────────────────────")
 
-    data = load_dataset(str(input_path))
+    data = load_dataset(args.input)
     data = remove_empty(data)
     data = remove_poor_quality(data)
     data = remove_duplicates(data)
+    data = clean_markdown_noise(data)
     print_stats(data)
     split_and_save(data, args.train_out, args.val_out, args.split)
 

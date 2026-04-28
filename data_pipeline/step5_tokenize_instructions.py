@@ -12,6 +12,7 @@ import json
 import argparse
 import sys
 import os
+import re
 from pathlib import Path
 from multiprocessing import Pool, cpu_count
 
@@ -33,6 +34,15 @@ VAL_TOKENS      = "data_pipeline/tokens/val_tokens.jsonl"
 _SP = None
 
 
+def _clean_markdown(text: str) -> str:
+    """Remove markdown formatting noise from text."""
+    text = text.replace('**', '')
+    text = re.sub(r'^\s*\*\s+', '', text, flags=re.MULTILINE)
+    text = re.sub(r'^#+\s+', '', text, flags=re.MULTILINE)
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
+
+
 def _init_worker(model_path: str):
     global _SP
     _SP = spm.SentencePieceProcessor()
@@ -47,6 +57,10 @@ def _tokenize_record(record_json: str):
         out    = item.get("output",      "").strip()
         if not inst or not out:
             return None
+        # Clean markdown from all fields
+        inst = _clean_markdown(inst)
+        inp = _clean_markdown(inp) if inp else ""
+        out = _clean_markdown(out)
         text   = build_training_prompt(inst, inp, out)
         tokens = _SP.encode(text, out_type=int)
         if len(tokens) < 5:

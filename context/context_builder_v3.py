@@ -271,7 +271,7 @@ if __name__ == "__main__":
     cb = ContextBuilderV3()
 
     tests = [
-        "I am growing rice near Guwahati. My soil is loamy and temperature is 32°C. "
+        "I am growing rice near sivakasi. My soil is loamy and temperature is 32°C. "
         "I see stem borer in my field. N=85 P=40 K=35.",
         "My potato crop has late blight. Season is rabi. Black soil.",
         "What fertilizer should I use for my cotton in kharif?",
