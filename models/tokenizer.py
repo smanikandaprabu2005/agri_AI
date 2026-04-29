@@ -37,11 +37,11 @@ def build_prompt(instruction: str, input_text: str = "") -> str:
     """Inference-time prompt (no output appended)."""
     if input_text.strip():
         return (
-            f"{INST_MARKER}{instruction.strip()}\n\n"
+            f" {INST_MARKER}{instruction.strip()}\n\n"
             f"{INPUT_MARKER}{input_text.strip()}\n\n"
             f"{RESPONSE_MARKER}"
         )
-    return f"{INST_MARKER}{instruction.strip()}\n\n{RESPONSE_MARKER}"
+    return f" {INST_MARKER}{instruction.strip()}\n\n{RESPONSE_MARKER}"
 
 
 def build_rag_prompt(instruction: str, context: str, input_text: str = "") -> str:
@@ -55,7 +55,7 @@ def build_rag_prompt(instruction: str, context: str, input_text: str = "") -> st
             f"{RESPONSE_MARKER}"
         )
     return (
-        f"{INST_MARKER}{instruction.strip()}\n\n"
+        f" {INST_MARKER}{instruction.strip()}\n\n"
         f"{CONTEXT_MARKER}{ctx}\n\n"
         f"{RESPONSE_MARKER}"
     )
@@ -65,12 +65,12 @@ def build_training_prompt(instruction: str, input_text: str, output: str) -> str
     """Training-time prompt (output appended so response can be masked)."""
     if input_text.strip():
         return (
-            f"{INST_MARKER}{instruction.strip()}\n\n"
+            f" {INST_MARKER}{instruction.strip()}\n\n"
             f"{INPUT_MARKER}{input_text.strip()}\n\n"
             f"{RESPONSE_MARKER}{output.strip()}"
         )
     return (
-        f"{INST_MARKER}{instruction.strip()}\n\n"
+        f" {INST_MARKER}{instruction.strip()}\n\n"
         f"{RESPONSE_MARKER}{output.strip()}"
     )
 

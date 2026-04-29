@@ -23,7 +23,7 @@ except ImportError:
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from models.tokenizer import build_training_prompt, RESPONSE_MARKER
-
+from config import BOS_ID
 # ── Config — use CLI flags if your folder has a space ──────────
 TOKENIZER_MODEL = "sage_tokenizer.model"
 TRAIN_DATASET   = "data_pipeline/data collection/train_dataset.jsonl"
@@ -63,6 +63,7 @@ def _tokenize_record(record_json: str):
         out = _clean_markdown(out)
         text   = build_training_prompt(inst, inp, out)
         tokens = _SP.encode(text, out_type=int)
+        tokens = [BOS_ID] + tokens  # Add BOS to match inference
         if len(tokens) < 5:
             return None
         return json.dumps({"tokens": tokens}, ensure_ascii=False)

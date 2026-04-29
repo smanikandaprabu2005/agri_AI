@@ -65,11 +65,11 @@ def build_corpus(train_path: str, knowledge_path: str, corpus_path: str) -> int:
                         inp = clean_markdown(inp) if inp else ""
                         out = clean_markdown(out)
                         if inp:
-                            text = (f"### Instruction:\n{inst}\n\n"
+                            text = (f" ### Instruction:\n{inst}\n\n"
                                     f"### Input:\n{inp}\n\n"
                                     f"### Response:\n{out}")
                         else:
-                            text = (f"### Instruction:\n{inst}\n\n"
+                            text = (f" ### Instruction:\n{inst}\n\n"
                                     f"### Response:\n{out}")
                         corpus.write(text.strip() + "\n")
                         total += 1
