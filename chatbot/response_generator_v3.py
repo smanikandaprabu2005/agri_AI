@@ -73,16 +73,10 @@ _PARAM_PATTERN = re.compile(
 
 def needs_advisory_pipeline(query: str) -> bool:
     """
-    True when the query contains field parameters and is asking
-    for crop/farming advice — not just a simple pest question.
+    True only when the query contains enough structured field inputs
+    to generate a complete ML-backed advisory.
     """
-    has_advisory_kw = bool(_ADVISORY_PATTERNS.search(query))
-    has_param = len(_PARAM_PATTERN.findall(query)) >= 2
-    has_ml_ask = bool(re.search(
-        r"\b(advisory|recommend|suggest|plan|guide|complete|full|sowing|harvest)\b",
-        query, re.I
-    ))
-    return (has_advisory_kw and (has_param or has_ml_ask)) or (has_param and has_ml_ask)
+    return parse_advisory_inputs(query) is not None
 
 
 # ════════════════════════════════════════════════════════════

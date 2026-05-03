@@ -456,6 +456,21 @@ const styles = {
     transition: "all 0.2s ease",
     boxShadow: "0 4px 12px rgba(16, 185, 129, 0.2)",
   },
+  plusBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    border: "1px solid #E2E8F0",
+    background: "#FFFFFF",
+    color: THEME.primary,
+    cursor: "pointer",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    flexShrink: 0,
+    transition: "all 0.2s ease",
+    boxShadow: "0 4px 12px rgba(16, 185, 129, 0.08)",
+  },
   sendBtnDisabled: {
     background: "#E2E8F0",
     color: THEME.straw,
@@ -689,6 +704,12 @@ const SendIcon = () => (
   </svg>
 );
 
+const PlusIcon = () => (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+    <path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
+  </svg>
+);
+
 const SettingsIcon = () => (
   <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
     <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="2"/>
@@ -900,7 +921,7 @@ const SettingsModal = ({ profile, onSave, onClose }) => {
 };
 
 // ── Main App ──────────────────────────────────────────────────
-export default function StromSageUI() {
+export default function StromSageUI({ onOpenAdvisory }) {
   const [messages, setMessages] = useState([]);
   const [input, setInput]       = useState("");
   const [loading, setLoading]   = useState(false);
@@ -1320,6 +1341,14 @@ export default function StromSageUI() {
                 }}
                 className="input-row"
               >
+                <button
+                  style={styles.plusBtn}
+                  onClick={() => onOpenAdvisory?.()}
+                  title="Open advisory"
+                  disabled={loading}
+                >
+                  <PlusIcon />
+                </button>
                 <textarea
                   ref={textareaRef}
                   style={styles.textarea}
@@ -1347,7 +1376,7 @@ export default function StromSageUI() {
 
               <div style={styles.inputHints}>
                 <span style={styles.hintText}>
-                  {loading ? "⟳ Thinking..." : "Press Enter to send · Shift+Enter for new line"}
+                  {loading ? "⟳ Thinking..." : "Press Enter to send · + for advisory"}
                 </span>
                 <div style={styles.quickBtns}>
                   {QUICK_PHRASES.map(p => (

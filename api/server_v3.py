@@ -107,7 +107,12 @@ app.add_middleware(
     allow_methods    = ["*"],
     allow_headers    = ["*"],
 )
-
+@app.on_event("startup")
+def startup_event():
+    try:
+        _load_system()
+    except Exception as e:
+        print(f"[API V3] Startup load failed: {e}")
 # ── System state ───────────────────────────────────────────────
 _system     = None
 _load_error = None

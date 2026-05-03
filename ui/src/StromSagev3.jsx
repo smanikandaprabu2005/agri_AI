@@ -1,16 +1,11 @@
 /*
  * ui/src/StromSageV3.jsx
  * =======================
- * SageStorm V3 Chat UI
- *
- * New in V3:
- *  - Advisory panel: enter field params → ML predicts → SageStorm explains
- *  - ML confidence bars shown alongside the SLM explanation
- *  - Chat still works for simple questions
- *  - "Advisory mode" auto-detected when field data is in message
+ * SageStorm V3 Advisory Panel
+ * ML-powered field advisory with crop/fertilizer predictions and detailed recommendations
  */
 
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect } from "react";
 
 const THEME = {
   soil:      "#2A2C24",
@@ -28,14 +23,11 @@ const THEME = {
 const S = {
   root: { fontFamily: "'Crimson Pro', Georgia, serif", background: "#F6EFE2", height: "100vh", display: "flex", flexDirection: "column", color: THEME.soil, overflow: "hidden" },
   header: { background: `linear-gradient(135deg, ${THEME.leaf} 0%, ${THEME.sage} 100%)`, padding: "0 28px", display: "flex", alignItems: "center", justifyContent: "space-between", height: 64, flexShrink: 0, boxShadow: "0 2px 12px rgba(0,0,0,0.12)" },
+  backBtn: { background: "rgba(255,255,255,0.18)", color: "#FFFFFF", border: "1px solid rgba(255,255,255,0.35)", borderRadius: 999, padding: "8px 14px", cursor: "pointer", fontSize: 12, fontWeight: 700, transition: "all 0.2s ease" },
   main: { display: "flex", flex: 1, overflow: "hidden" },
   sidebar: { width: 280, background: THEME.cream, borderRight: `1px solid ${THEME.sage}25`, display: "flex", flexDirection: "column", overflow: "hidden", flexShrink: 0 },
   chatArea: { flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" },
   messages: { flex: 1, overflowY: "auto", padding: "24px 32px", display: "flex", flexDirection: "column", gap: 18 },
-  inputArea: { borderTop: `1px solid ${THEME.wheat}60`, background: THEME.parchment, padding: "16px 28px 20px" },
-  inputRow: { display: "flex", gap: 10, background: "#fff", border: `1px solid ${THEME.wheat}50`, borderRadius: 20, padding: "10px 14px 10px 18px", boxShadow: "0 4px 16px rgba(0,0,0,0.06)" },
-  textarea: { flex: 1, border: "none", outline: "none", resize: "none", background: "transparent", fontFamily: "'Crimson Pro', Georgia, serif", fontSize: 15, color: THEME.soil, lineHeight: 1.5, minHeight: 22, maxHeight: 100 },
-  sendBtn: { width: 40, height: 40, borderRadius: 12, border: "none", background: THEME.sprout, color: THEME.parchment, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 },
   card: { background: "#fff", border: `1px solid ${THEME.wheat}50`, borderRadius: 14, padding: "14px 16px", marginBottom: 10 },
   label: { fontSize: 11, color: THEME.straw, fontFamily: "'Source Code Pro', monospace", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 6, display: "block" },
   input: { width: "100%", padding: "7px 10px", border: `1px solid ${THEME.wheat}`, borderRadius: 8, background: "#fff", fontFamily: "'Crimson Pro', Georgia, serif", fontSize: 14, color: THEME.soil, outline: "none", boxSizing: "border-box" },
@@ -82,13 +74,6 @@ const MLPanel = ({ preds }) => {
       {preds.pesticide_target && (
         <div style={{ fontSize: 12, color: THEME.bark, marginTop: 6, padding: "6px 8px", background: "#fef3c7", borderRadius: 6 }}>
           ⚠ Pest risk: <strong>{preds.pesticide_target}</strong> → {preds.pesticide}
-        </div>
-      )}
-      {preds.crop_top3 && preds.crop_top3.length > 1 && (
-        <div style={{ fontSize: 11, color: THEME.straw, marginTop: 8 }}>
-          Alternatives: {preds.crop_top3.slice(1).map(x =>
-            `${x.crop || x.crop} (${typeof x.confidence === "number" && x.confidence < 1 ? Math.round(x.confidence * 100) : x.confidence}%)`
-          ).join(", ")}
         </div>
       )}
     </div>
@@ -138,7 +123,7 @@ const TypingDots = () => (
   </div>
 );
 
-const FormField = ({ label, id, type = "number", value, onChange, options }) => (
+const FormField = ({ label, type = "number", value, onChange, options }) => (
   <div style={{ marginBottom: 10 }}>
     <label style={S.label}>{label}</label>
     {options ? (
@@ -146,7 +131,7 @@ const FormField = ({ label, id, type = "number", value, onChange, options }) => 
         {options.map(o => <option key={o} value={o}>{o}</option>)}
       </select>
     ) : (
-      <input type={type} style={S.input} value={value} onChange={e => onChange(type === "number" ? parseFloat(e.target.value) : e.target.value)} step="any" />
+      <input type={type} style={S.input} value={value} onChange={e => onChange(type === "number" ? parseFloat(e.target.value) || "" : e.target.value)} step="any" />
     )}
   </div>
 );
@@ -157,24 +142,14 @@ const DEFAULT_FIELDS = {
   season: "Kharif", irrigation: "Sprinkler", region: "East", previous_crop: "Rice", farm_size: 3
 };
 
-export default function StromSageV3() {
+export default function StromSageV3({ onClose }) {
   const [messages, setMessages]   = useState([]);
-  const [input, setInput]         = useState("");
   const [loading, setLoading]     = useState(false);
-  const [mode, setMode]           = useState("chat"); // "chat" | "advisory"
   const [fields, setFields]       = useState(DEFAULT_FIELDS);
   const [lastPreds, setLastPreds] = useState(null);
   const endRef   = useRef(null);
-  const taRef    = useRef(null);
 
   useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, loading]);
-
-  useEffect(() => {
-    if (taRef.current) {
-      taRef.current.style.height = "auto";
-      taRef.current.style.height = Math.min(taRef.current.scrollHeight, 100) + "px";
-    }
-  }, [input]);
 
   const fieldUpdate = (key) => (val) => setFields(f => ({ ...f, [key]: val }));
 
@@ -183,7 +158,7 @@ export default function StromSageV3() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(15000),
+      signal: AbortSignal.timeout(100000),
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return res.json();
@@ -198,10 +173,9 @@ export default function StromSageV3() {
     return {
       crop, crop_confidence: 84, fertilizer: fert, fertilizer_confidence: 76,
       pesticide: "Chlorpyrifos 20EC", pesticide_target: "Stem borer",
-      pesticide_dose: "2.5 ml/litre", alternatives: [],
+      pesticide_dose: "2.5 ml/litre",
       source: "advisory_ml",
       advisory_text:
-        `[ML Prediction: ${crop} (84% confidence) · Fertilizer: ${fert} · Pest risk: Stem borer]\n\n` +
         `Based on your field data — ${inputs.soil_type} soil, pH ${inputs.ph}, N=${inputs.N}/P=${inputs.P}/K=${inputs.K} kg/ha, ` +
         `${inputs.temperature}°C, ${inputs.humidity}% humidity, ${inputs.rainfall}mm rainfall in ${inputs.season} season — ` +
         `I recommend growing ${crop} this season.\n\n` +
@@ -219,7 +193,7 @@ export default function StromSageV3() {
   };
 
   const submitAdvisory = async () => {
-    const userText = `Advisory request: ${fields.soil_type} soil, pH ${fields.ph}, N=${fields.N}/P=${fields.P}/K=${fields.K}, Temp ${fields.temperature}°C, Humidity ${fields.humidity}%, Rainfall ${fields.rainfall}mm, ${fields.season} season, ${fields.region} India`;
+    const userText = `Advisory: ${fields.soil_type} soil, pH ${fields.ph}, N/P/K: ${fields.N}/${fields.P}/${fields.K}, ${fields.temperature}°C, ${fields.humidity}% humidity, ${fields.rainfall}mm rainfall, ${fields.season} season`;
     const userMsg = { id: Date.now(), role: "user", text: userText, time: new Date() };
     setMessages(m => [...m, userMsg]);
     setLoading(true);
@@ -236,7 +210,6 @@ export default function StromSageV3() {
         crop: data.crop, crop_confidence: data.crop_confidence,
         fertilizer: data.fertilizer, fertilizer_confidence: data.fertilizer_confidence,
         pesticide: data.pesticide, pesticide_target: data.pesticide_target,
-        crop_top3: data.alternatives || [],
       };
       setLastPreds(preds);
 
@@ -253,32 +226,6 @@ export default function StromSageV3() {
       setLoading(false);
     }
   };
-
-  const submitChat = useCallback(async (text) => {
-    const q = (text || input).trim();
-    if (!q || loading) return;
-    setInput("");
-    const userMsg = { id: Date.now(), role: "user", text: q, time: new Date() };
-    setMessages(m => [...m, userMsg]);
-    setLoading(true);
-
-    try {
-      let data;
-      try {
-        data = await callAPI("/chat", { query: q });
-      } catch {
-        await new Promise(r => setTimeout(r, 900));
-        data = { answer: `SageStorm: ${q.length > 30 ? "Based on agricultural best practices, " : ""}I'd recommend consulting your local KVK for region-specific advice on this. For detailed crop management, share your field parameters for a complete ML-backed advisory.`, source: "sagestorm" };
-      }
-      const preds = data.ml_predictions || null;
-      if (preds) setLastPreds(preds);
-      setMessages(m => [...m, { id: Date.now() + 1, role: "bot", text: data.answer, source: data.source, ml_predictions: preds, time: new Date() }]);
-    } catch {
-      setMessages(m => [...m, { id: Date.now() + 1, role: "bot", text: "Connection error.", source: "fallback", time: new Date() }]);
-    } finally {
-      setLoading(false);
-    }
-  }, [input, loading]);
 
   return (
     <>
@@ -297,20 +244,21 @@ export default function StromSageV3() {
             <div style={{ width: 32, height: 32, borderRadius: "50%", background: THEME.sprout, display: "flex", alignItems: "center", justifyContent: "center", color: THEME.wheat, fontSize: 16 }}>S</div>
             <div>
               <div style={{ fontSize: 17, fontWeight: 700, color: THEME.wheat, fontFamily: "'Playfair Display', Georgia, serif" }}>Strom Sage V3</div>
-              <div style={{ fontSize: 10, color: THEME.straw, letterSpacing: "0.12em" }}>ML ADVISORY · SAGESTORM SLM</div>
+              <div style={{ fontSize: 10, color: THEME.straw, letterSpacing: "0.12em" }}>ML ADVISORY · FIELD ANALYSIS</div>
             </div>
           </div>
-          <div style={{ display: "flex", gap: 6 }}>
-            {["chat", "advisory"].map(m => (
-              <button key={m} onClick={() => setMode(m)} style={{ padding: "6px 14px", border: `1px solid ${mode === m ? THEME.sprout : THEME.sage + "44"}`, borderRadius: 10, background: mode === m ? THEME.sprout : "transparent", color: mode === m ? THEME.wheat : THEME.straw, cursor: "pointer", fontSize: 12, fontFamily: "monospace" }}>
-                {m === "chat" ? "Chat" : "Advisory"}
-              </button>
-            ))}
+          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+            <button style={S.backBtn} onClick={onClose}>
+              ← Back to Chat
+            </button>
+            <div style={{ padding: "6px 14px", borderRadius: 10, background: THEME.sprout, color: THEME.wheat, fontSize: 12, fontFamily: "monospace", fontWeight: 700 }}>
+              Advisory Mode
+            </div>
           </div>
         </header>
 
         <div style={S.main}>
-          {/* Sidebar */}
+          {/* Sidebar with field parameters */}
           <aside style={S.sidebar}>
             <div style={{ padding: "14px 16px", borderBottom: `1px solid ${THEME.wheat}40`, overflowY: "auto", flex: 1 }}>
               <div style={{ fontSize: 11, color: THEME.straw, fontFamily: "monospace", letterSpacing: "0.12em", marginBottom: 12 }}>FIELD PARAMETERS</div>
@@ -347,26 +295,22 @@ export default function StromSageV3() {
             </div>
           </aside>
 
-          {/* Chat */}
+          {/* Main advisory panel */}
           <main style={S.chatArea}>
             <div style={S.messages}>
-              {messages.length === 0 && (
+              {messages.length === 0 ? (
                 <div style={{ textAlign: "center", padding: "3rem 2rem", color: THEME.straw }}>
-                  <div style={{ fontSize: 40, marginBottom: 16 }}>🌾</div>
-                  <div style={{ fontSize: 22, fontWeight: 700, color: THEME.leaf, fontFamily: "'Playfair Display', serif", marginBottom: 10 }}>Namaste! I'm Strom Sage</div>
+                  <div style={{ fontSize: 22, fontWeight: 700, color: THEME.leaf, fontFamily: "'Playfair Display', serif", marginBottom: 10 }}>ML-Powered Field Advisory</div>
                   <div style={{ fontSize: 15, color: THEME.bark, maxWidth: 440, margin: "0 auto 28px", lineHeight: 1.7 }}>
-                    Enter your field parameters in the sidebar and click <strong>Get ML Advisory</strong> to receive a complete ML-predicted, SageStorm-explained farming plan.
+                    Enter your soil and field parameters in the sidebar, then click <strong>Get ML Advisory</strong> to receive a customized crop recommendation and detailed management plan.
                   </div>
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, maxWidth: 460, margin: "0 auto" }}>
-                    {["How do I control stem borers in rice?", "What fertilizer for wheat in clay soil?", "Should I spray today given high humidity?", "Best spacing for tomato plants?"].map((q, i) => (
-                      <button key={i} onClick={() => submitChat(q)} style={{ background: "#fff", border: `1px solid ${THEME.wheat}60`, borderRadius: 12, padding: "10px 14px", cursor: "pointer", fontSize: 13, color: THEME.soil, textAlign: "left", lineHeight: 1.4 }}>
-                        {q}
-                      </button>
-                    ))}
+                  <div style={{ fontSize: 13, color: THEME.straw, maxWidth: 440, margin: "0 auto", lineHeight: 1.6 }}>
+                    Our ML model analyzes your field data to predict the best crops and optimal fertilizer doses for maximum yield.
                   </div>
                 </div>
+              ) : (
+                messages.map(m => <Message key={m.id} msg={m} />)
               )}
-              {messages.map(m => <Message key={m.id} msg={m} />)}
               {loading && (
                 <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
                   <div style={{ width: 32, height: 32, borderRadius: "50%", background: THEME.moss, display: "flex", alignItems: "center", justifyContent: "center", color: THEME.wheat, fontSize: 14, flexShrink: 0 }}>S</div>
@@ -374,18 +318,6 @@ export default function StromSageV3() {
                 </div>
               )}
               <div ref={endRef} />
-            </div>
-
-            <div style={S.inputArea}>
-              <div style={S.inputRow}>
-                <textarea ref={taRef} style={S.textarea} value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submitChat(); } }} placeholder="Ask about crops, pests, fertilizers..." rows={1} disabled={loading} />
-                <button style={{ ...S.sendBtn, ...((!input.trim() || loading) ? { background: THEME.wheat, cursor: "not-allowed" } : {}) }} onClick={() => submitChat()} disabled={!input.trim() || loading}>
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M22 2L11 13M22 2L15 22L11 13M22 2L2 9L11 13" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/></svg>
-                </button>
-              </div>
-              <div style={{ marginTop: 6, fontSize: 11, color: THEME.straw, fontFamily: "monospace" }}>
-                Enter to send · Shift+Enter for new line · Use sidebar for ML advisory
-              </div>
             </div>
           </main>
         </div>

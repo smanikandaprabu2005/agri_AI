@@ -320,7 +320,7 @@ class AgriPredictor:
             return self._rule_predict(inputs)
 
     def _ml_predict(self, inp: Dict) -> Dict:
-        # ── Crop prediction (soil model) ─────────────────────
+        # ── Crop prediction (soil model or NPK-based model) ────
         soil_num = np.array([
             inp.get("ph", 6.5),
             inp.get("soil_moisture", 30.0),
@@ -342,6 +342,16 @@ class AgriPredictor:
         ]).reshape(1, -1)
 
         X_crop = np.hstack([soil_num, soil_cat])
+        if hasattr(self.crop_scaler, "n_features_in_") and self.crop_scaler.n_features_in_ == len(NPK_FEATURES):
+            X_crop = np.array([
+                inp.get("N", 80),
+                inp.get("P", 40),
+                inp.get("K", 40),
+                inp.get("temperature", 25.0),
+                inp.get("humidity", 65.0),
+                inp.get("ph", 6.5),
+                inp.get("rainfall", 100.0),
+            ]).reshape(1, -1)
 
         crop_pred, crop_conf, crop_top3 = "Rice", 0.72, []
         if self.crop_model is not None:
@@ -369,9 +379,10 @@ class AgriPredictor:
             inp.get("rainfall", 100.0),
         ]).reshape(1, -1)
 
-        if "label" in self.enc.encoders:
+        if "npk_crop" in self.enc.encoders:
             crop_code = self.enc.transform(crop_pred, "npk_crop")
-            npk_num = np.column_stack([npk_num, [[crop_code]]])
+            if hasattr(self.fert_scaler, "n_features_in_") and self.fert_scaler.n_features_in_ == npk_num.shape[1] + 1:
+                npk_num = np.column_stack([npk_num, [[crop_code]]])
 
         fert_pred, fert_conf = "Urea", 0.65
         fert_top3 = []
