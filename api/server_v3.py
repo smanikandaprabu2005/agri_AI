@@ -136,14 +136,28 @@ def _load_system():
 
         print("[API V3] Loading system components...")
 
-        # Retriever
+        # Retriever — try VectorDB first for semantic search
+        ret, vocab = None, None
         try:
-            ret, vocab = load_retriever(RETRIEVER_DIR)
+            from retrieval.vector_db import VectorDB
+            vdb_path = os.path.join("saved_models", "vector_index")
+            if os.path.exists(os.path.join(vdb_path, "config.json")):
+                ret = VectorDB.load(vdb_path)
+                stats = ret.stats()
+                print(f"[API V3] VectorDB loaded: {stats['total_docs']:,} chunks, dim={stats['dim']}")
+                print(f"       Encoder: {stats.get('model_name', 'unknown')}")
+            else:
+                raise FileNotFoundError("VectorDB index not found")
         except Exception as e:
-            print(f"  [!] Retriever not found: {e} — using dummy")
-            class _DummyRet:
-                def retrieve(self, q, top_k=5): return []
-            ret, vocab = _DummyRet(), None
+            print(f"[API V3] VectorDB not available: {e}")
+            print("       Falling back to BM25/TF-IDF retriever")
+            try:
+                ret, vocab = load_retriever(RETRIEVER_DIR)
+            except Exception as e2:
+                print(f"  [!] Retriever not found: {e2} — using dummy")
+                class _DummyRet:
+                    def retrieve(self, q, top_k=5): return []
+                ret, vocab = _DummyRet(), None
 
         memory  = MemoryManager()
         weather = WeatherService(city=DEFAULT_CITY,

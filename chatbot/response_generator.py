@@ -480,12 +480,12 @@ class ResponseGenerator:
                         cleaned = f"{cleaned}\n\n[Weather advisory] {adv}"
                     except Exception:
                         pass
-                return cleaned, "retrieval"
+                return cleaned, "retrieval_high"
 
             # Fall back to the passage itself
             summary = self._summarize_passage(query, passage)
             if is_coherent(summary) and is_on_domain(summary) and not has_hallucinated_terms(summary):
-                return summary, "retrieval"
+                return summary, "retrieval_high"
             # Return raw passage truncated
             result = truncate(passage, max_sent=4)
             if needs_weather(query):
@@ -495,7 +495,7 @@ class ResponseGenerator:
                     result = f"{result}\n\n[Weather advisory] {adv}"
                 except Exception:
                     pass
-            return result, "retrieval"
+            return result, "retrieval_high"
 
         if passage and confidence >= 0.15:
             summary = self._summarize_passage(query, passage)
@@ -508,10 +508,10 @@ class ResponseGenerator:
                     and summary
                     and not summary[0].islower()
                     and (not crop or crop.lower() in summary.lower())):
-                return summary, "retrieval"
+                return summary, "retrieval_low"
             # Return passage directly (safe fallback)
             result = truncate(passage, max_sent=4)
-            return result, "retrieval"
+            return result, "retrieval_low"
 
         # ── L4: SageStorm generation ──────────────────────────
         context, ctx_conf = self.ctx_builder.build_context_str(query)

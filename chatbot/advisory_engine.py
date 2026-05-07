@@ -310,19 +310,28 @@ Previous crop     : {prev_crop}
     def _slm_generate(self, prompt: str) -> str:
         """Feed prompt to SageStorm and decode the output."""
         if self.model is None:
+            print("[AdvisoryEngine] Model is None — cannot generate SLM output")
             return ""
         try:
             ids     = self.tokenizer.encode_prompt(prompt)
+            print(f"[AdvisoryEngine] Prompt encoded: {len(ids)} tokens")
             gen_ids = self.model.generate(
                 ids,
                 max_tokens  = self.max_tokens,
                 temperature = self.temperature,
                 device      = DEVICE,
             )
+            print(f"[AdvisoryEngine] Generated {len(gen_ids)} tokens")
             raw = self.tokenizer.decode(gen_ids, skip_special=True)
-            return clean_advisory_output(raw)
+            print(f"[AdvisoryEngine] Decoded output length: {len(raw)} chars")
+            cleaned = clean_advisory_output(raw)
+            print(f"[AdvisoryEngine] Cleaned output: {len(cleaned)} chars, {len(cleaned.split())} words")
+            print(f"[AdvisoryEngine] Sample: {cleaned[:150]}...")
+            return cleaned
         except Exception as e:
+            import traceback
             print(f"[AdvisoryEngine] SLM generation error: {e}")
+            traceback.print_exc()
             return ""
 
     def _fallback_advisory(self, predictions: Dict) -> str:
@@ -480,17 +489,20 @@ Keep records of yield, input cost, and sale price for next season planning."""
         slm_output = self._slm_generate(prompt)
 
         # 5. Validate output quality
-        min_words = 80
-        has_content = (len(slm_output.split()) >= min_words and
-                       any(kw in slm_output.lower() for kw in
+        min_words = 30  # Reduced from 80 — accept partial SLM output
+        has_keywords = any(kw in slm_output.lower() for kw in
                            ["crop", "soil", "fertilizer", "seed", "water",
-                            "harvest", "apply", "spray", "grow"]))
+                            "harvest", "apply", "spray", "grow", "recommend", "land", "prepare"])
+        has_content = len(slm_output.split()) >= min_words and has_keywords
+
+        print(f"[AdvisoryEngine] SLM validation — words={len(slm_output.split())}, keywords={has_keywords}, content={has_content}")
 
         if has_content:
             advisory_text = slm_output
             source = "sagestorm"
         else:
             # Fallback to rule-based advisory
+            print(f"[AdvisoryEngine] SLM validation failed — using fallback (output: {len(slm_output)} chars)")
             advisory_text = self._fallback_advisory(predictions)
             source = "fallback"
 

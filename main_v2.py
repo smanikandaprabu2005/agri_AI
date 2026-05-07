@@ -46,7 +46,10 @@ def load_system(weights_path, api_key, city, temperature, max_tokens, use_vector
     from retrieval.vector_search    import load_retriever
     from memory.memory_manager      import MemoryManager
     from weather.weather_api        import WeatherService
-    from chatbot.response_generator import ResponseGenerator
+    try:
+        from chatbot.response_generator_v3 import ResponseGeneratorV3 as ResponseGenerator
+    except ImportError:
+        from chatbot.response_generator import ResponseGenerator
     from models.tokenizer           import SageTokenizer
 
     print("[Main] Loading RAG components...")

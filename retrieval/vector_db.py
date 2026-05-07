@@ -296,6 +296,14 @@ class VectorDB:
             sorted_results = [r for r in sorted_results if r["score"] >= min_score]
         return sorted_results[:top_k]
 
+    def retrieve(self, query: str, top_k: int = 5) -> List[Tuple[float, str]]:
+        """
+        Compatibility method for existing retriever interface.
+        Returns [(score, text), ...] format.
+        """
+        results = self.search(query, top_k=top_k, min_score=0.0)
+        return [(r["score"], r["text"]) for r in results]
+
     def save(self, directory: str):
         """Persist the index to disk."""
         os.makedirs(directory, exist_ok=True)

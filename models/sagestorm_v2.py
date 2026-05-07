@@ -240,8 +240,8 @@ class SageStormV2(nn.Module):
 
         self._init_weights()
         pc = self.param_count()
-        print(f"[Model] SageStorm V2.2 — {pc['total_M']}M params "
-              f"({num_layers}L × {embed_dim}d × {num_heads}h, "
+        print(f"[Model] SageStorm V2.2 -- {pc['total_M']}M params "
+              f"({num_layers}L x {embed_dim}d x {num_heads}h, "
               f"ctx={context_length}, drop_path_max={drop_path_max})")
 
     def _init_weights(self):
@@ -343,7 +343,7 @@ class SageStormV2(nn.Module):
                 "drop_path_max"  : self.blocks[-1].drop_path_p,
             }
         }, path)
-        print(f"[Model] Saved {self.param_count()['total_M']}M params → {path}")
+        print(f"[Model] Saved {self.param_count()['total_M']}M params to {path}")
 
     @classmethod
     def load(cls, path: str, device: str = DEVICE) -> "SageStormV2":
@@ -352,7 +352,7 @@ class SageStormV2(nn.Module):
         model = cls(**{k: v for k, v in cfg.items()}, use_grad_ckpt=False)
         model.load_state_dict(ckpt["model_state"])
         model.eval()
-        print(f"[Model] Loaded {model.param_count()['total_M']}M params ← {path}")
+        print(f"[Model] Loaded {model.param_count()['total_M']}M params from {path}")
         return model.to(device)
 
     def param_count(self) -> dict:
